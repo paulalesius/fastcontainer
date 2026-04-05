@@ -57,53 +57,53 @@ class Builder:
         return Layer(path=layer_path, hash=step_hash)
 
     def build(self) -> None:
-            """Main build entry point – identical flow to the original script."""
-            if self.final_path.is_dir():
-                print(f"✅ {self.spec.final_name} already exists. Nothing to do.")
-                return
+        """Main build entry point – identical flow to the original script."""
+        if self.final_path.is_dir():
+            print(f"✅ {self.spec.final_name} already exists. Nothing to do.")
+            return
 
-            print(f"Building layered image {self.spec.base} → {self.spec.final_name}")
+        print(f"Building layered image {self.spec.base} → {self.spec.final_name}")
 
-            # Start hash chain from base
-            current = Layer.initial(
-                base_path=self.containers_dir / self.spec.base,
-                base_name=self.spec.base,
-            )
+        # Start hash chain from base
+        current = Layer.initial(
+            base_path=self.containers_dir / self.spec.base,
+            base_name=self.spec.base,
+        )
 
-            try:
-                for step in self.spec.steps:
-                    try:
-                        current = self._build_layer(current, step)
-                    except Exception as e:  # catches CalledProcessError etc.
-                        print(f"❌ Build failed at step {step.index}.")
-                        print("   Previous layers are cached and safe.")
-                        print("   Temporary volume (if any) kept for debugging.")
-                        raise
-            except Exception:
-                # No cleanup on failure → temp volumes stay for inspection
-                raise
-            else:
-                # All steps done → final clean image
-                print(f"\nAll steps complete. Creating final image {self.spec.final_name}")
+        try:
+            for step in self.spec.steps:
+                try:
+                    current = self._build_layer(current, step)
+                except Exception as e:  # catches CalledProcessError etc.
+                    print(f"❌ Build failed at step {step.index}.")
+                    print("   Previous layers are cached and safe.")
+                    print("   Temporary volume (if any) kept for debugging.")
+                    raise
+        except Exception:
+            # No cleanup on failure → temp volumes stay for inspection
+            raise
+        else:
+            # All steps done → final clean image
+            print(f"\nAll steps complete. Creating final image {self.spec.final_name}")
 
-                final_temp_name = f"_{self.spec.base}-final-{uuid.uuid4().hex[:8]}"
-                final_temp_path = self.containers_dir / final_temp_name
+            final_temp_name = f"_{self.spec.base}-final-{uuid.uuid4().hex[:8]}"
+            final_temp_path = self.containers_dir / final_temp_name
 
-                snapshot(current.path, final_temp_path)
+            snapshot(current.path, final_temp_path, quiet=self.quiet)
 
-                # Write manifest
-                manifest = Manifest.from_spec(self.spec)
-                manifest_path = final_temp_path / "fastcontainer.json"
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest.to_dict(), f, indent=2)
-                print(f"  Wrote manifest → {manifest_path}")
+            # Write manifest
+            manifest = Manifest.from_spec(self.spec)
+            manifest_path = final_temp_path / "fastcontainer.json"
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest.to_dict(), f, indent=2)
+            print(f"  Wrote manifest → {manifest_path}")
 
-                snapshot(final_temp_path, self.final_path)
-                delete(final_temp_path)
-                self._prune_intermediates()
+            snapshot(final_temp_path, self.final_path, quiet=self.quiet)
+            delete(final_temp_path, quiet=self.quiet)
+            self._prune_intermediates()
 
-                print(f"✅ Successfully built: {self.spec.final_name}")
-                print(f"   (Intermediates __{self.spec.base}-* were pruned on success)")
+            print(f"✅ Successfully built: {self.spec.final_name}")
+            print(f"   (Intermediates __{self.spec.base}-* were pruned on success)")
 
     def _prune_intermediates(self) -> None:
         """Delete ALL intermediate layers for this base after a successful build."""
