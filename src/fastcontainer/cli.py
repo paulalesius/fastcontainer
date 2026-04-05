@@ -5,6 +5,7 @@ fastcontainer CLI — built with Click
 """
 import os
 import sys
+import fcntl
 from pathlib import Path
 
 import click
@@ -31,6 +32,23 @@ def main(containers_dir: Path, prepare_yaml: Path) -> None:
     # Root check (exact same message as before)
     if os.geteuid() != 0:
         click.secho("ERROR: This program must be run as root (use sudo)", fg="red")
+        sys.exit(1)
+
+    # ─────────────────────────────────────────────────────────────
+    # Single-build lock (only one fastcontainer can run at a time)
+    # ─────────────────────────────────────────────────────────────
+    lock_path = containers_dir / ".fastcontainer.lock"
+    try:
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        click.secho(
+            f"ERROR: Another fastcontainer build is already running in {containers_dir}",
+            fg="red",
+        )
+        sys.exit(1)
+    except Exception as e:
+        click.secho(f"ERROR: Failed to acquire lock: {e}", fg="red")
         sys.exit(1)
 
     try:

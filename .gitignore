@@ -1,2 +1,4 @@
+# .gitignore
 *\.egg-info/
 uv\.lock
++.fastcontainer.lock

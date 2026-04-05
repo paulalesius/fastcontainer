@@ -19,8 +19,8 @@ class Builder:
         self.final_path = self.containers_dir / spec.final_name
 
     def _layer_path(self, step_hash: str) -> Path:
-        """Permanent layer subvolume name (exactly as original)."""
-        return self.containers_dir / f"_{self.spec.base}-{step_hash}"
+        """Permanent layer subvolume name (now clearly marked as internal)."""
+        return self.containers_dir / f"__{self.spec.base}-{step_hash}"
 
     def _build_layer(self, previous: Layer, step: Step) -> Layer:
         """Build one layer (or use cache)."""
@@ -69,14 +69,23 @@ class Builder:
             base_name=self.spec.base,
         )
 
-        for step in self.spec.steps:
-            try:
-                current = self._build_layer(current, step)
-            except Exception as e:  # catches CalledProcessError etc.
-                print(f"❌ Build failed at step {step.index}.")
-                print("   Previous layers are cached and safe.")
-                print("   Temporary volume (if any) kept for debugging.")
-                raise
+        try:
+            for step in self.spec.steps:
+                try:
+                    current = self._build_layer(current, step)
+                except Exception as e:  # catches CalledProcessError etc.
+                    print(f"❌ Build failed at step {step.index}.")
+                    print("   Previous layers are cached and safe.")
+                    print("   Temporary volume (if any) kept for debugging.")
+                    raise
+        finally:
+            # optional: clean any stray temps that might have been left
+            for p in self.containers_dir.glob(f"__{self.spec.base}-temp-*"):
+                if p.is_dir():
+                    delete(p, commit=False)
+            for p in self.containers_dir.glob(f"__{self.spec.base}-final-*"):
+                if p.is_dir():
+                    delete(p, commit=False)
 
         # All steps done → final clean image
         print(f"\nAll steps complete. Creating final image {self.spec.final_name}")
@@ -95,6 +104,17 @@ class Builder:
 
         snapshot(final_temp_path, self.final_path)
         delete(final_temp_path)
+        self._prune_intermediates()
 
         print(f"✅ Successfully built: {self.spec.final_name}")
         print(f"   (Intermediates cached as _{self.spec.base}-* for future rebuilds)")
+
+    def _prune_intermediates(self) -> None:
+        """Delete ALL intermediate layers for this base after a successful build."""
+        print("\n🧹 Pruning all intermediate layers (keeping only the final image)...")
+        pattern = f"__{self.spec.base}-*"          # update if you didn't change the prefix
+        for p in sorted(self.containers_dir.glob(pattern)):
+            if p.is_dir():
+                print(f"   Deleting {p.name}")
+                delete(p, commit=False)   # no need to commit on every delete
+        print("   ✓ All intermediates removed")
