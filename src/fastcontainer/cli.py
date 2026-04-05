@@ -1,4 +1,3 @@
-# fastcontainer/fastcontainer/cli.py
 """
 fastcontainer CLI — built with Click
 """
@@ -25,8 +24,10 @@ from .log import setup_logger
     "prepare_yaml",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path, resolve_path=True),
 )
+@click.option('-p', '--profile', required=True,
+              help="Profile name from the YAML 'profiles:' section (required).")
 @click.option('-q', '--quiet', is_flag=True, help="Quiet mode: hide tool commands (only show progress + your RUN output).")
-def main(containers_dir: Path, prepare_yaml: Path, quiet: bool) -> None:
+def main(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn."""
 
     logger = setup_logger(quiet=quiet)
@@ -52,7 +53,19 @@ def main(containers_dir: Path, prepare_yaml: Path, quiet: bool) -> None:
     try:
         spec = BuildSpec.from_yaml(prepare_yaml)
 
-        builder = Builder(containers_dir=containers_dir, spec=spec, quiet=quiet, logger=logger)
+        if profile not in spec.profiles:
+            logger.error(f"ERROR: Profile '{profile}' not found in YAML. Available profiles: {list(spec.profiles.keys())}")
+            sys.exit(1)
+
+        selected_profile = spec.profiles[profile]
+
+        builder = Builder(
+            containers_dir=containers_dir,
+            spec=spec,
+            profile=selected_profile,
+            quiet=quiet,
+            logger=logger
+        )
         builder.build()
     except Exception as e:
         logger.error(f"❌ Build failed: {e}")

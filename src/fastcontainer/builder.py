@@ -1,4 +1,3 @@
-# fastcontainer/builder.py
 import hashlib
 import uuid
 import sys
@@ -7,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .models import BuildSpec, Layer, Manifest, Step
+from .models import BuildSpec, Layer, Manifest, Step, NspawnProfile
 from .btrfs import snapshot, delete, create
 from .nspawn import execute
 from .utils import run_and_capture
@@ -19,9 +18,10 @@ logger = logging.getLogger("fastcontainer")
 class Builder:
     """High-level orchestration of the layered btrfs build process."""
 
-    def __init__(self, containers_dir: Path, spec: BuildSpec, quiet: bool = False, logger: logging.Logger | None = None):
+    def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile, quiet: bool = False, logger: logging.Logger | None = None):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
+        self.profile = profile
         self.final_path = self.containers_dir / spec.final_name
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
@@ -42,11 +42,11 @@ class Builder:
         temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
-        self.logger.info(f"  Creating empty subvolume → {temp_name}")
-        create(temp_path, quiet=self.quiet)
-
         # === Run create command on the HOST with cwd = temp_path ===
         try:
+            self.logger.info(f"  Creating empty subvolume → {temp_name}")
+            create(temp_path, quiet=self.quiet)
+
             self.logger.info("  Executing base creation script (host, cwd = subvolume)...")
             cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
             run_and_capture(cmd, quiet=self.quiet, cwd=temp_path)
@@ -89,7 +89,7 @@ class Builder:
         snapshot(previous.path, temp_path, quiet=self.quiet)
 
         self.logger.info(f"  Executing step {step.index}...")
-        output = execute(temp_path, step.cmd, quiet=self.quiet)
+        output = execute(temp_path, step.cmd, self.profile.nspawn, quiet=self.quiet)
 
         current_logs[f"{step.index:03d}"] = {
             "command": step.cmd,
@@ -115,7 +115,7 @@ class Builder:
             self.logger.info(f"✅ {self.spec.final_name} already exists. Nothing to do.")
             return
 
-        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.spec.final_name}")
+        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.spec.final_name} (profile: {self.profile.name})")
 
         self._ensure_base_exists()
 

@@ -11,6 +11,25 @@ import yaml
 
 
 @dataclass(frozen=True)
+class NspawnProfile:
+    """nspawn execution profile definition."""
+    name: str
+    nspawn: List[str]   # full command template containing {{ROOT}}
+
+    @classmethod
+    def from_data(cls, name: str, data: Any) -> "NspawnProfile":
+        if not isinstance(data, dict) or "nspawn" not in data:
+            raise ValueError(f"Profile '{name}' must contain 'nspawn:' key (list of strings)")
+        nspawn_raw = data["nspawn"]
+        if not isinstance(nspawn_raw, list):
+            raise ValueError(f"Profile '{name}' nspawn must be a list of strings")
+        return cls(
+            name=name,
+            nspawn=[str(item) for item in nspawn_raw]
+        )
+
+
+@dataclass(frozen=True)
 class BaseSpec:
     """Base image specification - can be pre-existing or built via command."""
     name: str                    # user-friendly name (ubuntu-noble)
@@ -102,7 +121,7 @@ class Manifest:
             "yaml_hash": self.yaml_hash,
             "final_name": self.final_name,
             "steps": self.steps,
-            "built_at": self.built_at,
+            "built_at": datetime.now().isoformat(),
             "logs": self.logs,
             "note": "This image was built with fastcontainer layered caching.",
         }
@@ -132,6 +151,7 @@ class BuildSpec:
     yaml_path: Path
     yaml_hash: str
     final_name: str
+    profiles: Dict[str, NspawnProfile]
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
@@ -152,6 +172,15 @@ class BuildSpec:
         if not isinstance(steps_raw, list):
             raise ValueError("'steps:' must be a list")
 
+        # Profiles section is now required
+        profiles_raw = spec.get("profiles")
+        if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
+            raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
+
+        profiles: Dict[str, NspawnProfile] = {}
+        for name, data in profiles_raw.items():
+            profiles[name] = NspawnProfile.from_data(name, data)
+
         # Deterministic final name
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
         final_name = f"{base.effective_name}-{yaml_hash}"
@@ -164,4 +193,5 @@ class BuildSpec:
             yaml_path=yaml_path,
             yaml_hash=yaml_hash,
             final_name=final_name,
+            profiles=profiles,
         )

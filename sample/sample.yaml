@@ -6,6 +6,17 @@ base:
     debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
     chroot . echo "test command inside chroot"
 
+profiles:
+  default:
+    nspawn:
+      - "systemd-nspawn"
+      - "-D"
+      - "{{ROOT}}"
+      - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"
+
 steps:
   - RUN: |
       apt-get update
@@ -19,3 +30,4 @@ steps:
       # systemctl doesn't work in nspawn → enable nginx manually (standard container pattern)
       mkdir -p /etc/systemd/system/multi-user.target.wants
       ln -sf /lib/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service
+
