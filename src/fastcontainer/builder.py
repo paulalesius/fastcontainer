@@ -2,7 +2,6 @@ import hashlib
 import uuid
 import sys
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +21,12 @@ class Builder:
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
-        self.final_path = self.containers_dir / spec.final_name
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
+
+        # Final name is now profile-aware (exactly as the README describes)
+        self.final_name = f"{spec.base.effective_name}-{profile.name}-{spec.yaml_hash}"
+        self.final_path = self.containers_dir / self.final_name
 
     def _ensure_base_exists(self) -> None:
         """Create base subvolume from command if it doesn't exist (cached by hash)."""
@@ -42,7 +44,6 @@ class Builder:
         temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
-        # === Run create command on the HOST with cwd = temp_path ===
         try:
             self.logger.info(f"  Creating empty subvolume → {temp_name}")
             create(temp_path, quiet=self.quiet)
@@ -53,14 +54,12 @@ class Builder:
 
             self.logger.info(f"✅ Base {self.spec.base.effective_name} created successfully")
 
-            # ←←← SNAPSHOT HAPPENS HERE (before cleanup) ←←←
             snapshot(temp_path, base_path, quiet=self.quiet)
 
         except Exception:
             self.logger.error("❌ Base creation failed — cleaning up temporary subvolume")
             raise
         finally:
-            # Always clean up the temporary subvolume (success or failure)
             if temp_path.is_dir():
                 delete(temp_path, quiet=True)
 
@@ -97,11 +96,13 @@ class Builder:
         }
         self.logger.info(f"  ✓ Step {step.index} finished (output embedded in manifest)")
 
-        # Write per-layer manifest (self-describing)
+        # Write per-layer manifest (self-describing + clearly marked intermediate)
         manifest = Manifest.from_spec(
             self.spec,
             profile_name=self.profile.name,
-            completed_logs=dict(current_logs)
+            final_name=self.final_name,
+            completed_logs=dict(current_logs),
+            stage="intermediate"
         )
         manifest_path = temp_path / "fastcontainer.json"
         with open(manifest_path, "w", encoding="utf-8") as f:
@@ -115,15 +116,11 @@ class Builder:
         return Layer(path=layer_path, hash=step_hash)
 
     def build(self) -> None:
-        # Make final name profile-aware so different profiles never collide
-        final_name = f"{self.spec.base.effective_name}-{self.profile.name}-{self.spec.yaml_hash}"
-        self.final_path = self.containers_dir / final_name
-
         if self.final_path.is_dir():
-            self.logger.info(f"✅ {final_name} already exists. Nothing to do.")
+            self.logger.info(f"✅ {self.final_name} already exists. Nothing to do.")
             return
 
-        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {final_name} (profile: {self.profile.name})")
+        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.final_name} (profile: {self.profile.name})")
 
         self._ensure_base_exists()
 
@@ -147,7 +144,7 @@ class Builder:
         except Exception:
             raise
         else:
-            self.logger.info(f"\nAll steps complete. Creating final image {self.spec.final_name}")
+            self.logger.info(f"\nAll steps complete. Creating final image {self.final_name}")
 
             final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex}"
             final_temp_path = self.containers_dir / final_temp_name
@@ -157,7 +154,9 @@ class Builder:
             manifest = Manifest.from_spec(
                 self.spec,
                 profile_name=self.profile.name,
-                completed_logs=step_logs
+                final_name=self.final_name,
+                completed_logs=step_logs,
+                stage="final"
             )
             manifest_path = final_temp_path / "fastcontainer.json"
             with open(manifest_path, "w", encoding="utf-8") as f:
@@ -169,7 +168,7 @@ class Builder:
 
             self._prune_intermediates()
 
-            self.logger.info(f"✅ Successfully built: {self.spec.final_name}")
+            self.logger.info(f"✅ Successfully built: {self.final_name}")
             self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned on success)")
 
     def _prune_intermediates(self) -> None:
@@ -181,5 +180,5 @@ class Builder:
                 and len(p.name) == len(prefix) + 40):
                 if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
                     self.logger.info(f"   Deleting {p.name}")
-                    delete(p, commit=False, quiet=self.quiet)
+                    delete(p, quiet=self.quiet)   # default commit=True → consistent with all other deletes
         self.logger.info("   ✓ All intermediates removed")

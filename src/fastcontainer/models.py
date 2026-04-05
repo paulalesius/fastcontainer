@@ -104,6 +104,7 @@ class Layer:
         ).hexdigest()
         return cls(path=base_path, hash=initial_hash)
 
+
 @dataclass
 class Manifest:
     """Data written to /fastcontainer.json inside every layer and the final image."""
@@ -112,6 +113,7 @@ class Manifest:
     yaml_hash: str
     final_name: str
     profile: str
+    stage: str          # "intermediate" or "final"
     steps: int
     built_at: str
     logs: Dict[str, Dict[str, Any]]
@@ -124,24 +126,28 @@ class Manifest:
             "yaml_hash": self.yaml_hash,
             "final_name": self.final_name,
             "profile": self.profile,
+            "stage": self.stage,
             "steps": self.steps,
-            "built_at": datetime.now().isoformat(),
+            "built_at": self.built_at,
             "logs": self.logs,
             "note": "This image was built with fastcontainer layered caching.",
         }
 
     @classmethod
-    def from_spec(cls, spec: BuildSpec, profile_name: str, completed_logs: Dict[str, Dict[str, Any]] | None = None) -> "Manifest":
-        """Create manifest for a layer (partial logs) or final image (full logs)."""
+    def from_spec(cls, spec: BuildSpec, profile_name: str, final_name: str,
+                  completed_logs: Dict[str, Dict[str, Any]] | None = None,
+                  stage: str = "final") -> "Manifest":
+        """Create manifest for a layer (partial) or final image (full)."""
         if completed_logs is None:
             completed_logs = {}
 
         return cls(
-            base=spec.base.name,                    # friendly name (what the user wrote)
+            base=spec.base.name,
             yaml_file=spec.yaml_path.name,
             yaml_hash=spec.yaml_hash,
-            final_name=spec.final_name,
+            final_name=final_name,
             profile=profile_name,
+            stage=stage,
             steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
             logs=completed_logs,
@@ -155,7 +161,6 @@ class BuildSpec:
     steps: List[Step]
     yaml_path: Path
     yaml_hash: str
-    final_name: str
     profiles: Dict[str, NspawnProfile]
 
     @classmethod
@@ -186,9 +191,7 @@ class BuildSpec:
         for name, data in profiles_raw.items():
             profiles[name] = NspawnProfile.from_data(name, data)
 
-        # Deterministic final name
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
-        final_name = f"{base.effective_name}-{yaml_hash}"
 
         steps = [Step.from_dict(s, i + 1) for i, s in enumerate(steps_raw)]
 
@@ -197,6 +200,5 @@ class BuildSpec:
             steps=steps,
             yaml_path=yaml_path,
             yaml_hash=yaml_hash,
-            final_name=final_name,
             profiles=profiles,
         )
