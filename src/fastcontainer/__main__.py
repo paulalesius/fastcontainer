@@ -2,7 +2,7 @@
 """
 Entry point so you can run the package directly with:
 
-    python -m fastcontainer.fastcontainer /disk/containers ./prepare.yaml
+    python -m fastcontainer /disk/containers ./prepare.yaml
 """
 
 from .cli import main
