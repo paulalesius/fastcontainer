@@ -84,13 +84,14 @@ class Layer:
 
 @dataclass
 class Manifest:
-    """Data written to /fastcontainer.json inside the final image."""
+    """Data written to /fastcontainer.json inside every layer and the final image."""
     base: str
     yaml_file: str
     yaml_hash: str
     final_name: str
     steps: int
     built_at: str
+    logs: Dict[str, Dict[str, str]]   # "001": {"command": "...", "output": "..."}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -101,16 +102,22 @@ class Manifest:
             "final_name": self.final_name,
             "steps": self.steps,
             "built_at": self.built_at,
+            "logs": self.logs,
             "note": "This image was built with fastcontainer layered caching.",
         }
 
     @classmethod
-    def from_spec(cls, spec: BuildSpec) -> "Manifest":
+    def from_spec(cls, spec: BuildSpec, completed_logs: Dict[str, Dict[str, str]] | None = None) -> "Manifest":
+        """Create manifest for a layer (partial logs) or final image (full logs)."""
+        if completed_logs is None:
+            completed_logs = {}
+
         return cls(
             base=spec.base,
             yaml_file=spec.yaml_path.name,
             yaml_hash=spec.yaml_hash,
             final_name=spec.final_name,
-            steps=len(spec.effective_steps()),
+            steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
+            logs=completed_logs,
         )

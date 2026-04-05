@@ -23,12 +23,23 @@ class Builder:
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
 
-    # ... _layer_path stays exactly the same ...
+    def _format_command_preview(self, cmd: str) -> str:
+        """Clean command for display in quiet mode (remove comments, make it readable)."""
+        lines = []
+        for line in cmd.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                lines.append(stripped)
+        if not lines:
+            return cmd.strip()
+        preview = " && ".join(lines)
+        return preview if len(preview) < 120 else preview[:117] + "..."
 
     def _layer_path(self, step_hash: str) -> Path:
         return self.containers_dir / f"__{self.spec.base}-{step_hash}"
 
-    def _build_layer(self, previous: Layer, step: Step) -> Layer:
+    def _build_layer(self, previous: Layer, step: Step, current_logs: dict) -> Layer:
+        """Build one layer and update the logs dict (passed by reference)."""
         if not step.cmd:
             return previous
 
@@ -48,7 +59,25 @@ class Builder:
         self.logger.info(f"  Creating temp snapshot → {temp_name}")
         snapshot(previous.path, temp_path, quiet=self.quiet)
 
-        execute(temp_path, step.cmd, quiet=self.quiet)
+        self.logger.info(f"  Executing step {step.index}...")
+        if self.quiet:
+            preview = self._format_command_preview(step.cmd)
+            self.logger.info(f"  Command:\n{preview}")          # ← always visible
+        output = execute(temp_path, step.cmd, quiet=self.quiet)
+
+        # Store command + output inside the logs dict
+        current_logs[f"{step.index:03d}"] = {
+            "command": step.cmd,
+            "output": output
+        }
+        self.logger.info(f"  ✓ Step {step.index} finished (output embedded in manifest)")
+
+        # Write per-layer manifest (self-describing)
+        manifest = Manifest.from_spec(self.spec, completed_logs=dict(current_logs))
+        manifest_path = temp_path / "fastcontainer.json"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest.to_dict(), f, indent=2)
+        self.logger.info(f"  ✓ Wrote per-layer manifest → fastcontainer.json")
 
         snapshot(temp_path, layer_path, quiet=self.quiet)
         delete(temp_path, quiet=self.quiet)
@@ -68,10 +97,12 @@ class Builder:
             base_name=self.spec.base,
         )
 
+        step_logs: Dict[str, Dict[str, str]] = {}   # ← accumulate here
+
         try:
             for step in self.spec.steps:
                 try:
-                    current = self._build_layer(current, step)
+                    current = self._build_layer(current, step, step_logs)
                 except Exception as e:
                     self.logger.error(f"❌ Build failed at step {step.index}.")
                     self.logger.info("   Previous layers are cached and safe.")
@@ -80,6 +111,7 @@ class Builder:
         except Exception:
             raise
         else:
+            # Final image gets the complete manifest
             self.logger.info(f"\nAll steps complete. Creating final image {self.spec.final_name}")
 
             final_temp_name = f"_{self.spec.base}-final-{uuid.uuid4().hex[:8]}"
@@ -87,11 +119,11 @@ class Builder:
 
             snapshot(current.path, final_temp_path, quiet=self.quiet)
 
-            manifest = Manifest.from_spec(self.spec)
+            manifest = Manifest.from_spec(self.spec, completed_logs=step_logs)
             manifest_path = final_temp_path / "fastcontainer.json"
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest.to_dict(), f, indent=2)
-            self.logger.info(f"  Wrote manifest → {manifest_path}")
+            self.logger.info(f"  Wrote final manifest → {manifest_path}")
 
             snapshot(final_temp_path, self.final_path, quiet=self.quiet)
             delete(final_temp_path, quiet=self.quiet)

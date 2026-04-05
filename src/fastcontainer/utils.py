@@ -31,3 +31,33 @@ def run(
             )
     else:
         subprocess.run(cmd, check=True)
+
+def run_and_capture(
+    cmd: List[str],
+    quiet: bool = False,
+) -> str:
+    """Run a command with live output (if not quiet) and always return the full output.
+
+    Used only for RUN steps so we can persist the build log inside the image.
+    """
+    import sys
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,           # line-buffered
+    )
+    output_lines: list[str] = []
+    for line in process.stdout:  # type: ignore
+        output_lines.append(line)
+        if not quiet:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    returncode = process.wait()
+    output = "".join(output_lines)
+
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd, output)
+
+    return output
