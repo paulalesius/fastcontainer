@@ -29,7 +29,7 @@ class Builder:
 
         # Chained hash (exact same algorithm as original)
         content = previous.hash.encode() + step.cmd.encode("utf-8")
-        step_hash = hashlib.sha1(content).hexdigest()[:16]
+        step_hash = hashlib.sha1(content).hexdigest()
         layer_path = self._layer_path(step_hash)
 
         # CACHE HIT?
@@ -111,7 +111,7 @@ class Builder:
         for p in sorted(self.containers_dir.iterdir()):
             if (p.is_dir()
                 and p.name.startswith(prefix)
-                and len(p.name) == len(prefix) + 16):  # hash is always 16 hex chars
+                and len(p.name) == len(prefix) + 40):  # full SHA1 = 40 hex chars
                 # Optional extra safety: verify it's hex
                 if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
                     print(f"   Deleting {p.name}")

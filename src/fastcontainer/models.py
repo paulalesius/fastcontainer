@@ -52,7 +52,7 @@ class BuildSpec:
             raise ValueError("YAML must contain 'base:' (string) and 'steps:' (list)")
 
         # Deterministic final name (unchanged from original)
-        yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()[:16]
+        yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
         final_name = f"{base_name}-{yaml_hash}"
 
         # Convert raw steps to typed Step objects
@@ -79,7 +79,7 @@ class Layer:
     @classmethod
     def initial(cls, base_path: Path, base_name: str) -> "Layer":
         """Start the hash chain from the base subvolume."""
-        initial_hash = hashlib.sha1(f"BASE:{base_name}".encode()).hexdigest()[:16]
+        initial_hash = hashlib.sha1(f"BASE:{base_name}".encode()).hexdigest()
         return cls(path=base_path, hash=initial_hash)
 
 @dataclass
