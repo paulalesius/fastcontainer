@@ -1,1 +1,1 @@
-sudo .venv/bin/fastcontainer /disk/fastcontainer ./prepare.yaml
+sudo .venv/bin/fastcontainer -q /disk/fastcontainer ./prepare.yaml
