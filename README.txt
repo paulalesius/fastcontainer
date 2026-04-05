@@ -25,6 +25,24 @@ Examples:
 The image name is the final subvolume name printed at the end of a successful build
 (e.g. `ubuntu-custom-default-abc123def456...`).
 
+Base specification
+------------------
+The `base:` key in the YAML supports two formats:
+
+1. Simple string — when the base btrfs subvolume already exists in the containers directory:
+
+        base: ubuntu-noble
+
+2. Dictionary with creation script — fastcontainer will automatically create the base the first time:
+
+        base:
+          name: ubuntu-custom
+          create: |
+            debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+            chroot . echo "test command inside chroot"
+
+When using the dictionary form with `create:`, the base subvolume on disk is named `<name>-<16hex>` (a short hash of the script). Changing the creation script automatically produces a new base.
+
 Temporary subvolumes & pruning policy
 -------------------------------------
 fastcontainer uses strict naming conventions so it can never accidentally delete your final images or bases:
@@ -71,3 +89,11 @@ profiles:
       - "--private-users=no"
       - "--resolv-conf=replace-stub"
       - "--timezone=off"
+
+Contributing & Development
+--------------------------
+Developers wanting to take part in the project can create feature requests or issues through GitHub.
+
+To ask the project questions in an LLM prompt, simply run:
+./scr/project-to-prompt.sh
+This script collects all source files into a clean, ready-to-paste format.
