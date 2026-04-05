@@ -80,10 +80,10 @@ class Builder:
                     raise
         finally:
             # optional: clean any stray temps that might have been left
-            for p in self.containers_dir.glob(f"__{self.spec.base}-temp-*"):
+            for p in self.containers_dir.glob(f"_{self.spec.base}-temp-*"):
                 if p.is_dir():
                     delete(p, commit=False)
-            for p in self.containers_dir.glob(f"__{self.spec.base}-final-*"):
+            for p in self.containers_dir.glob(f"_{self.spec.base}-final-*"):
                 if p.is_dir():
                     delete(p, commit=False)
 
@@ -107,12 +107,12 @@ class Builder:
         self._prune_intermediates()
 
         print(f"✅ Successfully built: {self.spec.final_name}")
-        print(f"   (Intermediates cached as _{self.spec.base}-* for future rebuilds)")
+        print(f"   (Intermediates __{self.spec.base}-* were pruned on success)")
 
     def _prune_intermediates(self) -> None:
         """Delete ALL intermediate layers for this base after a successful build."""
         print("\n🧹 Pruning all intermediate layers (keeping only the final image)...")
-        pattern = f"__{self.spec.base}-*"          # update if you didn't change the prefix
+        pattern = f"__{self.spec.base}-*"
         for p in sorted(self.containers_dir.glob(pattern)):
             if p.is_dir():
                 print(f"   Deleting {p.name}")
