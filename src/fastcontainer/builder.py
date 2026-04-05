@@ -59,16 +59,19 @@ class Builder:
         self.logger.info(f"  Creating temp snapshot → {temp_name}")
         snapshot(previous.path, temp_path, quiet=self.quiet)
 
+        # === Clean command printing in quiet mode (one line at a time, no comments) ===
         self.logger.info(f"  Executing step {step.index}...")
         if self.quiet:
-            preview = self._format_command_preview(step.cmd)
-            self.logger.info(f"  Command:\n{preview}")          # ← always visible
+            for line in step.cmd.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    self.logger.info(f"  Command: {stripped}")
         output = execute(temp_path, step.cmd, quiet=self.quiet)
 
-        # Store command + output inside the logs dict
+        # Store in manifest: command = full original string, output = array of lines
         current_logs[f"{step.index:03d}"] = {
             "command": step.cmd,
-            "output": output
+            "output": output.splitlines()
         }
         self.logger.info(f"  ✓ Step {step.index} finished (output embedded in manifest)")
 

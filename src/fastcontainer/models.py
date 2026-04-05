@@ -91,7 +91,7 @@ class Manifest:
     final_name: str
     steps: int
     built_at: str
-    logs: Dict[str, Dict[str, str]]   # "001": {"command": "...", "output": "..."}
+    logs: Dict[str, Dict[str, Any]]   # "001": {"command": str, "output": list[str]}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -107,7 +107,7 @@ class Manifest:
         }
 
     @classmethod
-    def from_spec(cls, spec: BuildSpec, completed_logs: Dict[str, Dict[str, str]] | None = None) -> "Manifest":
+    def from_spec(cls, spec: BuildSpec, completed_logs: Dict[str, Dict[str, Any]] | None = None) -> "Manifest":
         """Create manifest for a layer (partial logs) or final image (full logs)."""
         if completed_logs is None:
             completed_logs = {}
