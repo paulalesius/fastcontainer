@@ -1,4 +1,5 @@
 # .gitignore
 *\.egg-info/
 uv\.lock
-+.fastcontainer.lock
+.fastcontainer.lock
+__pycache__/

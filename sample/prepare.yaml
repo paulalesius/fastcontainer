@@ -1,6 +1,6 @@
 # Want to also support a "command:" so that base can be built out of a command
 # Then the first layer of the container will be a hash
-base: debian-12
+base: ubuntu-noble
 
 steps:
   - RUN: |
@@ -12,4 +12,6 @@ steps:
 
   - RUN: |
       # Multi-line scripts work perfectly
-      systemctl enable nginx
+      # systemctl doesn't work in nspawn → enable nginx manually (standard container pattern)
+      mkdir -p /etc/systemd/system/multi-user.target.wants
+      ln -sf /lib/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service
