@@ -98,7 +98,6 @@ class Layer:
     @classmethod
     def initial(cls, base_path: Path, base_name: str, profile_name: str) -> "Layer":
         """Start the hash chain from the base subvolume, including the profile."""
-        # Profile name is included so different nspawn flags produce different layer hashes
         initial_hash = hashlib.sha1(
             f"BASE:{base_name}:{profile_name}".encode()
         ).hexdigest()
@@ -113,7 +112,8 @@ class Manifest:
     yaml_hash: str
     final_name: str
     profile: str
-    stage: str          # "intermediate" or "final"
+    nspawn_template: List[str]
+    stage: str
     steps: int
     built_at: str
     logs: Dict[str, Dict[str, Any]]
@@ -126,6 +126,7 @@ class Manifest:
             "yaml_hash": self.yaml_hash,
             "final_name": self.final_name,
             "profile": self.profile,
+            "nspawn_template": self.nspawn_template,
             "stage": self.stage,
             "steps": self.steps,
             "built_at": self.built_at,
@@ -134,7 +135,7 @@ class Manifest:
         }
 
     @classmethod
-    def from_spec(cls, spec: BuildSpec, profile_name: str, final_name: str,
+    def from_spec(cls, spec: BuildSpec, profile: NspawnProfile, final_name: str,
                   completed_logs: Dict[str, Dict[str, Any]] | None = None,
                   stage: str = "final") -> "Manifest":
         """Create manifest for a layer (partial) or final image (full)."""
@@ -146,11 +147,33 @@ class Manifest:
             yaml_file=spec.yaml_path.name,
             yaml_hash=spec.yaml_hash,
             final_name=final_name,
-            profile=profile_name,
+            profile=profile.name,
+            nspawn_template=profile.nspawn[:],
             stage=stage,
             steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
             logs=completed_logs,
+        )
+
+    @classmethod
+    def from_subvolume(cls, path: Path) -> "Manifest":
+        """Load manifest from a built container (used by exec)."""
+        manifest_path = path / "fastcontainer.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"No fastcontainer.json found in {path}")
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return cls(
+            base=data["base"],
+            yaml_file=data["yaml_file"],
+            yaml_hash=data["yaml_hash"],
+            final_name=data["final_name"],
+            profile=data["profile"],
+            nspawn_template=data["nspawn_template"],
+            stage=data["stage"],
+            steps=data["steps"],
+            built_at=data["built_at"],
+            logs=data["logs"],
         )
 
 

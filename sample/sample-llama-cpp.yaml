@@ -1,0 +1,33 @@
+# Want to also support a "command:" so that base can be built out of a command
+# Then the first layer of the container will be a hash
+base:
+  name: ubuntu-custom
+  create: |
+    debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+    chroot . echo "test command inside chroot"
+
+profiles:
+  default:
+    nspawn:
+      - "systemd-nspawn"
+      - "-D"
+      - "{{ROOT}}"
+      - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"
+
+steps:
+  - RUN: |
+      apt-get update
+      apt-get install -y nginx curl
+
+  - RUN: |
+      echo "Hello from fastcontainer layer 2" > /etc/motd
+
+  - RUN: |
+      # Multi-line scripts work perfectly
+      # systemctl doesn't work in nspawn → enable nginx manually (standard container pattern)
+      mkdir -p /etc/systemd/system/multi-user.target.wants
+      ln -sf /lib/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service
+

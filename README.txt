@@ -1,3 +1,30 @@
+fastcontainer - Minimal btrfs + systemd-nspawn layered container builder
+============================================================================
+
+Usage
+-----
+
+Build a container:
+    sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-q]
+
+Run a command inside a built container:
+    sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-q]
+
+Interactive shell example:
+    sudo fastcontainer exec <containers_dir> <image-name> -- bash -l
+
+Examples:
+    sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default
+
+    # Run a one-off command
+    sudo fastcontainer exec /disk/containers ubuntu-custom-default-1a2b3c... -- apt-get install -y htop
+
+    # Open an interactive shell
+    sudo fastcontainer exec /disk/containers ubuntu-custom-default-1a2b3c... -- bash -l
+
+The image name is the final subvolume name printed at the end of a successful build
+(e.g. `ubuntu-custom-default-abc123def456...`).
+
 Temporary subvolumes & pruning policy
 -------------------------------------
 fastcontainer uses strict naming conventions so it can never accidentally delete your final images or bases:
@@ -13,18 +40,14 @@ This design gives you:
 - Zero risk of deleting the wrong subvolumes
 - Old bases are intentionally kept when the `create:` script changes (different hash suffix)
 
-The layer hash chain and final image name are now **profile-aware**.
-Different profiles (`-p default` vs `-p host-network`) produce completely different hashes and final subvolume names. This guarantees reproducibility when the nspawn command line differs.
-
-Intermediate layers are **not** kept across different `.yaml` files — this is intentional to avoid filling your disk with old layers.
+The layer hash chain and final image name are **profile-aware**. Different profiles produce completely different hashes and final subvolume names.
 
 Profiles
 --------
-Every build now requires a `profiles:` section in the YAML. Each profile defines the exact
-`systemd-nspawn` command line (including binary name and all flags). The `systemd-nspawn`
-binary itself is resolved automatically from your environment/PATH.
+Every build requires a `profiles:` section in the YAML. Each profile defines the exact
+`systemd-nspawn` command line (including the binary name and all flags).
 
-You must specify which profile to use with the required `-p/--profile` CLI flag.
+You must specify which profile to use with the required `-p/--profile` flag.
 
 Example:
 ```yaml
@@ -45,3 +68,6 @@ profiles:
       - "{{ROOT}}"
       - "--network-host"
       - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"

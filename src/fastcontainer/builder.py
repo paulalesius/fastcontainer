@@ -99,7 +99,7 @@ class Builder:
         # Write per-layer manifest (self-describing + clearly marked intermediate)
         manifest = Manifest.from_spec(
             self.spec,
-            profile_name=self.profile.name,
+            profile=self.profile,                    # ← fixed
             final_name=self.final_name,
             completed_logs=dict(current_logs),
             stage="intermediate"
@@ -153,7 +153,7 @@ class Builder:
 
             manifest = Manifest.from_spec(
                 self.spec,
-                profile_name=self.profile.name,
+                profile=self.profile,                # ← fixed
                 final_name=self.final_name,
                 completed_logs=step_logs,
                 stage="final"
@@ -180,5 +180,5 @@ class Builder:
                 and len(p.name) == len(prefix) + 40):
                 if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
                     self.logger.info(f"   Deleting {p.name}")
-                    delete(p, quiet=self.quiet)   # default commit=True → consistent with all other deletes
+                    delete(p, quiet=self.quiet)
         self.logger.info("   ✓ All intermediates removed")
