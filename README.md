@@ -2,7 +2,9 @@ fastcontainer - Minimal btrfs + systemd-nspawn layered container builder
 ============================================================================
 
 <div align="center">
-  <img src="logo.jpg" alt="fastcontainer">
+  <img src="logo.jpg" alt="fastcontainer" width="500">
+  <h1>fastcontainer</h1>
+  <p><strong>A lightweight, fast, and minimal container builder using btrfs subvolumes and systemd-nspawn.</strong></p>
 </div>
 
 Usage
