@@ -98,7 +98,11 @@ class Builder:
         self.logger.info(f"  ✓ Step {step.index} finished (output embedded in manifest)")
 
         # Write per-layer manifest (self-describing)
-        manifest = Manifest.from_spec(self.spec, completed_logs=dict(current_logs))
+        manifest = Manifest.from_spec(
+            self.spec,
+            profile_name=self.profile.name,
+            completed_logs=dict(current_logs)
+        )
         manifest_path = temp_path / "fastcontainer.json"
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest.to_dict(), f, indent=2)
@@ -111,17 +115,22 @@ class Builder:
         return Layer(path=layer_path, hash=step_hash)
 
     def build(self) -> None:
+        # Make final name profile-aware so different profiles never collide
+        final_name = f"{self.spec.base.effective_name}-{self.profile.name}-{self.spec.yaml_hash}"
+        self.final_path = self.containers_dir / final_name
+
         if self.final_path.is_dir():
-            self.logger.info(f"✅ {self.spec.final_name} already exists. Nothing to do.")
+            self.logger.info(f"✅ {final_name} already exists. Nothing to do.")
             return
 
-        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.spec.final_name} (profile: {self.profile.name})")
+        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {final_name} (profile: {self.profile.name})")
 
         self._ensure_base_exists()
 
         current = Layer.initial(
             base_path=self.containers_dir / self.spec.base.effective_name,
             base_name=self.spec.base.effective_name,
+            profile_name=self.profile.name,
         )
 
         step_logs: dict[str, dict[str, Any]] = {}
@@ -145,7 +154,11 @@ class Builder:
 
             snapshot(current.path, final_temp_path, quiet=self.quiet)
 
-            manifest = Manifest.from_spec(self.spec, completed_logs=step_logs)
+            manifest = Manifest.from_spec(
+                self.spec,
+                profile_name=self.profile.name,
+                completed_logs=step_logs
+            )
             manifest_path = final_temp_path / "fastcontainer.json"
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest.to_dict(), f, indent=2)

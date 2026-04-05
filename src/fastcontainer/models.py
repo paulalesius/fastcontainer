@@ -96,11 +96,13 @@ class Layer:
     hash: str
 
     @classmethod
-    def initial(cls, base_path: Path, base_name: str) -> "Layer":
-        """Start the hash chain from the base subvolume."""
-        initial_hash = hashlib.sha1(f"BASE:{base_name}".encode()).hexdigest()
+    def initial(cls, base_path: Path, base_name: str, profile_name: str) -> "Layer":
+        """Start the hash chain from the base subvolume, including the profile."""
+        # Profile name is included so different nspawn flags produce different layer hashes
+        initial_hash = hashlib.sha1(
+            f"BASE:{base_name}:{profile_name}".encode()
+        ).hexdigest()
         return cls(path=base_path, hash=initial_hash)
-
 
 @dataclass
 class Manifest:
@@ -109,6 +111,7 @@ class Manifest:
     yaml_file: str
     yaml_hash: str
     final_name: str
+    profile: str
     steps: int
     built_at: str
     logs: Dict[str, Dict[str, Any]]
@@ -120,6 +123,7 @@ class Manifest:
             "yaml_file": self.yaml_file,
             "yaml_hash": self.yaml_hash,
             "final_name": self.final_name,
+            "profile": self.profile,
             "steps": self.steps,
             "built_at": datetime.now().isoformat(),
             "logs": self.logs,
@@ -127,7 +131,7 @@ class Manifest:
         }
 
     @classmethod
-    def from_spec(cls, spec: BuildSpec, completed_logs: Dict[str, Dict[str, Any]] | None = None) -> "Manifest":
+    def from_spec(cls, spec: BuildSpec, profile_name: str, completed_logs: Dict[str, Dict[str, Any]] | None = None) -> "Manifest":
         """Create manifest for a layer (partial logs) or final image (full logs)."""
         if completed_logs is None:
             completed_logs = {}
@@ -137,6 +141,7 @@ class Manifest:
             yaml_file=spec.yaml_path.name,
             yaml_hash=spec.yaml_hash,
             final_name=spec.final_name,
+            profile=profile_name,
             steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
             logs=completed_logs,

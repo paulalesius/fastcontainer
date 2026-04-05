@@ -2,7 +2,7 @@ Temporary subvolumes & pruning policy
 -------------------------------------
 fastcontainer uses strict naming conventions so it can never accidentally delete your final images or bases:
 
-- Final images:          `<effective_base>-<40hex_yaml>`
+- Final images:          `<effective_base>-<profile>-<40hex_yaml>`
 - Base subvolumes:       `<name>` or `<name>-<16hex>` (when using `create:`)
 - Intermediate layers:   `__<effective_base>-<40hex>`   ← automatically pruned on success
 - Temporary volumes:     `_...-<32hex_uuid>` (start with single underscore) ← always cleaned up
@@ -12,6 +12,9 @@ This design gives you:
 - A clean containers directory after every successful build (no disk bloat)
 - Zero risk of deleting the wrong subvolumes
 - Old bases are intentionally kept when the `create:` script changes (different hash suffix)
+
+The layer hash chain and final image name are now **profile-aware**.
+Different profiles (`-p default` vs `-p host-network`) produce completely different hashes and final subvolume names. This guarantees reproducibility when the nspawn command line differs.
 
 Intermediate layers are **not** kept across different `.yaml` files — this is intentional to avoid filling your disk with old layers.
 
