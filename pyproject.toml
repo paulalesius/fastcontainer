@@ -1,8 +1,29 @@
 [project]
 name = "fastcontainer"
 version = "0.1.0"
-description = "Minimal btrfs + systemd-nspawn container builder"
+description = "Minimal btrfs + systemd-nspawn layered container builder"
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml >= 6.0",
+    "click >= 8.1",
 ]
+
+[project.scripts]
+fastcontainer = "fastcontainer.fastcontainer.cli:main"
+
+# ─────────────────────────────────────────────────────────────
+# Proper src-layout configuration (this fixes your uv sync error)
+# ─────────────────────────────────────────────────────────────
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fastcontainer*"]
+
+[build-system]
+requires = ["setuptools >= 45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.urls]
+# Homepage = "https://github.com/yourname/fastcontainer"   # optional
