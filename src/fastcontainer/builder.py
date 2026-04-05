@@ -4,6 +4,7 @@ import uuid
 import sys
 import json
 from pathlib import Path
+from typing import Dict
 
 from .models import BuildSpec, Layer, Manifest, Step
 from .btrfs import snapshot, delete
@@ -22,18 +23,6 @@ class Builder:
         self.final_path = self.containers_dir / spec.final_name
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
-
-    def _format_command_preview(self, cmd: str) -> str:
-        """Clean command for display in quiet mode (remove comments, make it readable)."""
-        lines = []
-        for line in cmd.splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                lines.append(stripped)
-        if not lines:
-            return cmd.strip()
-        preview = " && ".join(lines)
-        return preview if len(preview) < 120 else preview[:117] + "..."
 
     def _layer_path(self, step_hash: str) -> Path:
         return self.containers_dir / f"__{self.spec.base}-{step_hash}"
