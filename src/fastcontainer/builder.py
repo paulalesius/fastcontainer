@@ -107,9 +107,13 @@ class Builder:
     def _prune_intermediates(self) -> None:
         """Delete ALL intermediate layers for this base after a successful build."""
         print("\n🧹 Pruning all intermediate layers (keeping only the final image)...")
-        # More robust: explicit filter instead of glob (immune to any special chars in base name)
+        prefix = f"__{self.spec.base}-"
         for p in sorted(self.containers_dir.iterdir()):
-            if p.is_dir() and p.name.startswith(f"__{self.spec.base}-"):
-                print(f"   Deleting {p.name}")
-                delete(p, commit=False)   # no need to commit on every delete
+            if (p.is_dir()
+                and p.name.startswith(prefix)
+                and len(p.name) == len(prefix) + 16):  # hash is always 16 hex chars
+                # Optional extra safety: verify it's hex
+                if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
+                    print(f"   Deleting {p.name}")
+                    delete(p, commit=False)
         print("   ✓ All intermediates removed")
