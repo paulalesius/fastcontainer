@@ -59,7 +59,7 @@ class Builder:
             """Main build entry point – identical flow to the original script."""
             if self.final_path.is_dir():
                 print(f"✅ {self.spec.final_name} already exists. Nothing to do.")
-                sys.exit(0)
+                return
 
             print(f"Building layered image {self.spec.base} → {self.spec.final_name}")
 

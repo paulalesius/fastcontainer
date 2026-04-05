@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-fastcontainer = "fastcontainer.fastcontainer.cli:main"
+fastcontainer = "fastcontainer.cli:main"
 
 # ─────────────────────────────────────────────────────────────
 # Proper src-layout configuration (this fixes your uv sync error)

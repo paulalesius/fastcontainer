@@ -38,6 +38,7 @@ def main(containers_dir: Path, prepare_yaml: Path) -> None:
     # Single-build lock (only one fastcontainer can run at a time)
     # ─────────────────────────────────────────────────────────────
     lock_path = containers_dir / ".fastcontainer.lock"
+    lock_fd = None
     try:
         lock_fd = open(lock_path, "w")
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -50,6 +51,32 @@ def main(containers_dir: Path, prepare_yaml: Path) -> None:
     except Exception as e:
         click.secho(f"ERROR: Failed to acquire lock: {e}", fg="red")
         sys.exit(1)
+
+    try:
+        spec = BuildSpec.from_yaml(prepare_yaml)
+        # Safety checks (exact same as original)
+        base_path = containers_dir / spec.base
+        if not base_path.is_dir():
+            click.secho(f"ERROR: Base subvolume not found: {base_path}", fg="red")
+            sys.exit(1)
+
+        if not base_path.resolve().is_relative_to(containers_dir):
+            click.secho("ERROR: Base subvolume must stay inside the containers directory", fg="red")
+            sys.exit(1)
+
+        builder = Builder(containers_dir=containers_dir, spec=spec)
+        builder.build()
+    except Exception as e:
+        click.secho(f"❌ Build failed: {e}", fg="red")
+        sys.exit(1)
+    finally:
+        # Always release the lock cleanly
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass  # best-effort cleanup
 
     try:
         spec = BuildSpec.from_yaml(prepare_yaml)
