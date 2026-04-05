@@ -1,6 +1,10 @@
 # Want to also support a "command:" so that base can be built out of a command
 # Then the first layer of the container will be a hash
-base: ubuntu-noble
+base:
+  name: ubuntu-custom
+  create: |
+    debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+    chroot . echo "test command inside chroot"
 
 steps:
   - RUN: |

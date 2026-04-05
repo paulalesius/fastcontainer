@@ -1,5 +1,4 @@
 # fastcontainer/fastcontainer/cli.py
-#!/usr/bin/env python3
 """
 fastcontainer CLI — built with Click
 """
@@ -52,14 +51,6 @@ def main(containers_dir: Path, prepare_yaml: Path, quiet: bool) -> None:
 
     try:
         spec = BuildSpec.from_yaml(prepare_yaml)
-        base_path = containers_dir / spec.base
-        if not base_path.is_dir():
-            logger.error(f"ERROR: Base subvolume not found: {base_path}")
-            sys.exit(1)
-
-        if not base_path.resolve().is_relative_to(containers_dir):
-            logger.error("ERROR: Base subvolume must stay inside the containers directory")
-            sys.exit(1)
 
         builder = Builder(containers_dir=containers_dir, spec=spec, quiet=quiet, logger=logger)
         builder.build()
@@ -71,6 +62,6 @@ def main(containers_dir: Path, prepare_yaml: Path, quiet: bool) -> None:
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
                 lock_fd.close()
-                lock_path.unlink(missing_ok=True)   # ← this is the new line
+                lock_path.unlink(missing_ok=True)
             except Exception:
                 pass

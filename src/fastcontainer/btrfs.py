@@ -13,3 +13,8 @@ def delete(path: Path | str, commit: bool = True, quiet: bool = False) -> None:
         cmd.append("-c")
     cmd.append(str(path))
     run(cmd, quiet=quiet, capture_output=quiet)
+
+
+def create(path: Path | str, quiet: bool = False) -> None:
+    """Create a new empty btrfs subvolume."""
+    run(["btrfs", "subvolume", "create", str(path)], quiet=quiet, capture_output=quiet)

@@ -3,12 +3,14 @@ import hashlib
 import uuid
 import sys
 import json
+import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Any
 
 from .models import BuildSpec, Layer, Manifest, Step
-from .btrfs import snapshot, delete
+from .btrfs import snapshot, delete, create
 from .nspawn import execute
+from .utils import run
 
 import logging
 logger = logging.getLogger("fastcontainer")
@@ -24,10 +26,63 @@ class Builder:
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
 
-    def _layer_path(self, step_hash: str) -> Path:
-        return self.containers_dir / f"__{self.spec.base}-{step_hash}"
+    def _ensure_base_exists(self) -> None:
+        """Create base subvolume from command if it doesn't exist (cached by hash)."""
+        base_path = self.containers_dir / self.spec.base.effective_name
 
-    def _build_layer(self, previous: Layer, step: Step, current_logs: dict) -> Layer:
+        if base_path.is_dir():
+            self.logger.info(f"✅ Using existing base: {self.spec.base.effective_name}")
+            return
+
+        if not self.spec.base.create_cmd:
+            raise FileNotFoundError(f"Base subvolume not found: {base_path}")
+
+        self.logger.info(f"🔨 Creating base '{self.spec.base.effective_name}' from command...")
+
+        temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex[:8]}"
+        temp_path = self.containers_dir / temp_name
+
+        self.logger.info(f"  Creating empty subvolume → {temp_name}")
+        create(temp_path, quiet=self.quiet)
+
+        # === Run create command on the HOST with cwd = temp_path ===
+        try:
+            self.logger.info("  Executing base creation script (host, cwd = subvolume)...")
+            cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
+            result = subprocess.run(
+                cmd,
+                cwd=temp_path,
+                capture_output=not self.quiet,
+                text=True,
+            )
+            if result.returncode != 0:
+                if result.stdout:
+                    sys.stdout.write(result.stdout)
+                if result.stderr:
+                    sys.stderr.write(result.stderr)
+                raise subprocess.CalledProcessError(
+                    result.returncode, cmd, result.stdout, result.stderr
+                )
+            if not self.quiet and result.stdout:
+                sys.stdout.write(result.stdout)
+
+            self.logger.info(f"✅ Base {self.spec.base.effective_name} created successfully")
+
+            # ←←← SNAPSHOT HAPPENS HERE (before cleanup) ←←←
+            snapshot(temp_path, base_path, quiet=self.quiet)
+
+        except Exception:
+            self.logger.error("❌ Base creation failed — cleaning up temporary subvolume")
+            raise
+        finally:
+            # Always clean up the temporary subvolume (success or failure)
+            if temp_path.is_dir():
+                delete(temp_path, quiet=True)
+
+    def _layer_path(self, step_hash: str) -> Path:
+        return self.containers_dir / f"__{self.spec.base.effective_name}-{step_hash}"
+
+    def _build_layer(self, previous: Layer, step: Step, current_logs: dict[str, dict[str, Any]]) -> Layer:
         """Build one layer and update the logs dict (passed by reference)."""
         if not step.cmd:
             return previous
@@ -42,22 +97,15 @@ class Builder:
 
         self.logger.info(f"\n[Step {step.index}/{len(self.spec.steps)}] RUN → new layer {layer_path.name}")
 
-        temp_name = f"_{self.spec.base}-temp-{uuid.uuid4().hex[:8]}"
+        temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex[:8]}"
         temp_path = self.containers_dir / temp_name
 
         self.logger.info(f"  Creating temp snapshot → {temp_name}")
         snapshot(previous.path, temp_path, quiet=self.quiet)
 
-        # === Clean command printing in quiet mode (one line at a time, no comments) ===
         self.logger.info(f"  Executing step {step.index}...")
-        if self.quiet:
-            for line in step.cmd.splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#"):
-                    self.logger.info(f"  Command: {stripped}")
         output = execute(temp_path, step.cmd, quiet=self.quiet)
 
-        # Store in manifest: command = full original string, output = array of lines
         current_logs[f"{step.index:03d}"] = {
             "command": step.cmd,
             "output": output.splitlines()
@@ -82,14 +130,16 @@ class Builder:
             self.logger.info(f"✅ {self.spec.final_name} already exists. Nothing to do.")
             return
 
-        self.logger.info(f"Building layered image {self.spec.base} → {self.spec.final_name}")
+        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.spec.final_name}")
+
+        self._ensure_base_exists()
 
         current = Layer.initial(
-            base_path=self.containers_dir / self.spec.base,
-            base_name=self.spec.base,
+            base_path=self.containers_dir / self.spec.base.effective_name,
+            base_name=self.spec.base.effective_name,
         )
 
-        step_logs: Dict[str, Dict[str, str]] = {}   # ← accumulate here
+        step_logs: dict[str, dict[str, Any]] = {}
 
         try:
             for step in self.spec.steps:
@@ -103,10 +153,9 @@ class Builder:
         except Exception:
             raise
         else:
-            # Final image gets the complete manifest
             self.logger.info(f"\nAll steps complete. Creating final image {self.spec.final_name}")
 
-            final_temp_name = f"_{self.spec.base}-final-{uuid.uuid4().hex[:8]}"
+            final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex[:8]}"
             final_temp_path = self.containers_dir / final_temp_name
 
             snapshot(current.path, final_temp_path, quiet=self.quiet)
@@ -123,11 +172,11 @@ class Builder:
             self._prune_intermediates()
 
             self.logger.info(f"✅ Successfully built: {self.spec.final_name}")
-            self.logger.info(f"   (Intermediates __{self.spec.base}-* were pruned on success)")
+            self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned on success)")
 
     def _prune_intermediates(self) -> None:
         self.logger.info("\n🧹 Pruning all intermediate layers (keeping only the final image)...")
-        prefix = f"__{self.spec.base}-"
+        prefix = f"__{self.spec.base.effective_name}-"
         for p in sorted(self.containers_dir.iterdir()):
             if (p.is_dir()
                 and p.name.startswith(prefix)

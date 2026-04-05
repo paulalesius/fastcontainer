@@ -1,4 +1,5 @@
-# fastcontainer/models.py
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
@@ -8,69 +9,68 @@ from typing import Any, Dict, List
 
 import yaml
 
+
+@dataclass(frozen=True)
+class BaseSpec:
+    """Base image specification - can be pre-existing or built via command."""
+    name: str                    # user-friendly name (ubuntu-noble)
+    create_cmd: str | None = None
+    effective_name: str = ""     # actual subvolume name on disk (with hash if created)
+
+
+    @classmethod
+    def from_data(cls, data: Any) -> "BaseSpec":
+        """Parse base: string or object with create command."""
+        if isinstance(data, str):
+            if not data.strip():
+                raise ValueError("base cannot be empty")
+            return cls(name=data.strip(), effective_name=data.strip())
+
+        if isinstance(data, dict):
+            name = data.get("name")
+            if not name or not isinstance(name, str) or not name.strip():
+                raise ValueError("base.name must be a non-empty string")
+
+            name = name.strip()
+            create_raw = data.get("create")
+            create_cmd = None
+            effective_name = name
+
+            if create_raw:
+                cmd_str = "\n".join(create_raw) if isinstance(create_raw, list) else str(create_raw)
+                create_cmd = cmd_str.strip()
+                if create_cmd:
+                    # 16 char hash keeps names readable
+                    h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
+                    effective_name = f"{name}-{h}"
+
+            return cls(
+                name=name,
+                create_cmd=create_cmd,
+                effective_name=effective_name
+            )
+
+        raise ValueError("base must be a string or dict with 'name' key")
+
+
 @dataclass(frozen=True)
 class Step:
     """A single build step (currently only RUN is supported)."""
     index: int
     raw: Dict[str, Any]
-    cmd: str | None = None  # normalized command string for RUN steps
+    cmd: str | None = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], index: int) -> "Step":
         if not isinstance(data, dict) or "RUN" not in data:
-            # Non-RUN steps are ignored for now (future-proof)
             return cls(index=index, raw=data)
 
         raw_cmd = data["RUN"]
-        # Normalize exactly like the original script (preserves | block newlines)
         cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
-
         return cls(index=index, raw=data, cmd=cmd_str.strip() if cmd_str else None)
 
+
 @dataclass(frozen=True)
-class BuildSpec:
-    """Complete build specification parsed from prepare.yaml."""
-    base: str
-    steps: List[Step]
-    yaml_path: Path
-    yaml_hash: str
-    final_name: str
-
-    @classmethod
-    def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
-        """Load and validate the YAML exactly as the original script did."""
-        if not yaml_path.is_file():
-            raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
-
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            spec = yaml.safe_load(f)
-
-        base_name = spec.get("base")
-        steps_raw = spec.get("steps", [])
-
-        if not base_name or not isinstance(steps_raw, list):
-            raise ValueError("YAML must contain 'base:' (string) and 'steps:' (list)")
-
-        # Deterministic final name (unchanged from original)
-        yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
-        final_name = f"{base_name}-{yaml_hash}"
-
-        # Convert raw steps to typed Step objects
-        steps = [Step.from_dict(s, i + 1) for i, s in enumerate(steps_raw)]
-
-        return cls(
-            base=base_name,
-            steps=steps,
-            yaml_path=yaml_path,
-            yaml_hash=yaml_hash,
-            final_name=final_name,
-        )
-
-    def effective_steps(self) -> List[Step]:
-        """Return only steps that actually do something (used for manifest)."""
-        return [s for s in self.steps if s.cmd]
-
-@dataclass
 class Layer:
     """Represents one layer in the hash chain (used during build)."""
     path: Path
@@ -82,6 +82,7 @@ class Layer:
         initial_hash = hashlib.sha1(f"BASE:{base_name}".encode()).hexdigest()
         return cls(path=base_path, hash=initial_hash)
 
+
 @dataclass
 class Manifest:
     """Data written to /fastcontainer.json inside every layer and the final image."""
@@ -91,7 +92,7 @@ class Manifest:
     final_name: str
     steps: int
     built_at: str
-    logs: Dict[str, Dict[str, Any]]   # "001": {"command": str, "output": list[str]}
+    logs: Dict[str, Dict[str, Any]]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -113,11 +114,54 @@ class Manifest:
             completed_logs = {}
 
         return cls(
-            base=spec.base,
+            base=spec.base.name,                    # friendly name (what the user wrote)
             yaml_file=spec.yaml_path.name,
             yaml_hash=spec.yaml_hash,
             final_name=spec.final_name,
             steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
             logs=completed_logs,
+        )
+
+
+@dataclass(frozen=True)
+class BuildSpec:
+    """Complete build specification parsed from prepare.yaml."""
+    base: BaseSpec
+    steps: List[Step]
+    yaml_path: Path
+    yaml_hash: str
+    final_name: str
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
+        """Load and validate the YAML."""
+        if not yaml_path.is_file():
+            raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
+
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            spec = yaml.safe_load(f)
+
+        base_raw = spec.get("base")
+        if base_raw is None:
+            raise ValueError("YAML must contain 'base:'")
+
+        base = BaseSpec.from_data(base_raw)
+        steps_raw = spec.get("steps", [])
+
+        if not isinstance(steps_raw, list):
+            raise ValueError("'steps:' must be a list")
+
+        # Deterministic final name
+        yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
+        final_name = f"{base.effective_name}-{yaml_hash}"
+
+        steps = [Step.from_dict(s, i + 1) for i, s in enumerate(steps_raw)]
+
+        return cls(
+            base=base,
+            steps=steps,
+            yaml_path=yaml_path,
+            yaml_hash=yaml_hash,
+            final_name=final_name,
         )
