@@ -13,10 +13,11 @@ from .nspawn import execute
 class Builder:
     """High-level orchestration of the layered btrfs build process."""
 
-    def __init__(self, containers_dir: Path, spec: BuildSpec):
+    def __init__(self, containers_dir: Path, spec: BuildSpec, quiet: bool = False):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.final_path = self.containers_dir / spec.final_name
+        self.quiet = quiet
 
     def _layer_path(self, step_hash: str) -> Path:
         """Permanent layer subvolume name (now clearly marked as internal)."""
@@ -43,14 +44,14 @@ class Builder:
         temp_path = self.containers_dir / temp_name
 
         print(f"  Creating temp snapshot → {temp_name}")
-        snapshot(previous.path, temp_path)
+        snapshot(previous.path, temp_path, quiet=self.quiet)
 
         # Run the command inside the container
-        execute(temp_path, step.cmd)
+        execute(temp_path, step.cmd, quiet=self.quiet)
 
         # Promote to permanent layer
-        snapshot(temp_path, layer_path)
-        delete(temp_path)
+        snapshot(temp_path, layer_path, quiet=self.quiet)
+        delete(temp_path, quiet=self.quiet)
 
         print(f"  ✓ Layer {layer_path.name} created")
         return Layer(path=layer_path, hash=step_hash)

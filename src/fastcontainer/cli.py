@@ -26,7 +26,8 @@ from .builder import Builder
     "prepare_yaml",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path, resolve_path=True),
 )
-def main(containers_dir: Path, prepare_yaml: Path) -> None:
+@click.option('-q', '--quiet', is_flag=True, help="Quiet mode: hide tool commands and nspawn banners (only show your RUN output + progress).")
+def main(containers_dir: Path, prepare_yaml: Path, quiet: bool) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn."""
 
     # Root check (exact same message as before)
@@ -64,7 +65,7 @@ def main(containers_dir: Path, prepare_yaml: Path) -> None:
             click.secho("ERROR: Base subvolume must stay inside the containers directory", fg="red")
             sys.exit(1)
 
-        builder = Builder(containers_dir=containers_dir, spec=spec)
+        builder = Builder(containers_dir=containers_dir, spec=spec, quiet=quiet)
         builder.build()
     except Exception as e:
         click.secho(f"❌ Build failed: {e}", fg="red")
