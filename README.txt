@@ -1,30 +1,16 @@
-The project is essentially a tiny, lightweight “Dockerfile → image” tool that:
+Temporary subvolumes & pruning policy
+-------------------------------------
+fastcontainer uses strict naming conventions so it can never accidentally delete your final images or bases:
 
-- Takes a very simple prepare.yaml (base image + list of RUN commands).
-- Builds a final container subvolume using btrfs copy-on-write snapshots for layering.
-- Provides fast per-step caching *during a single build run* (previous successful steps stay cached while you fix a failing one).
-- Automatically prunes all intermediate layers on a successful build, keeping your containers directory clean.
-- Writes a small fastcontainer.json manifest inside the final image for introspection.
+- Final images:          `<effective_base>-<40hex_yaml>`
+- Base subvolumes:       `<name>` or `<name>-<16hex>` (when using `create:`)
+- Intermediate layers:   `__<effective_base>-<40hex>`   ← automatically pruned on success
+- Temporary volumes:     `_...-<32hex_uuid>` (start with single underscore) ← always cleaned up
 
-NEW: base creation
-------------------
-`base` can now be either:
+This design gives you:
+- Fast per-step caching **during a single build run** (great when iterating on a failing step)
+- A clean containers directory after every successful build (no disk bloat)
+- Zero risk of deleting the wrong subvolumes
+- Old bases are intentionally kept when the `create:` script changes (different hash suffix)
 
-a) a simple string (100% backwards compatible):
-   base: ubuntu-noble
-
-b) an object that creates the base on-the-fly:
-   base:
-     name: ubuntu-noble
-     create: |
-       debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
-       chroot . apt-get clean
-
-   The create script is executed **on the host** with its working directory set to the new subvolume.
-   This is exactly what debootstrap, pacstrap, etc. expect.
-
-   IMPORTANT SAFETY NOTE:
-   - Commands run on the **host**. Absolute paths starting with / affect the host filesystem.
-   - For cleanup commands that should run inside the new rootfs, use `chroot . command` (as shown above).
-
-It is intentionally minimal (only RUN steps for now) and designed to be extremely fast and simple to understand/maintain. No Docker daemon, no Buildah/Podman required — just root + btrfs + systemd-nspawn.
+Intermediate layers are **not** kept across different `.yaml` files — this is intentional to avoid filling your disk with old layers.

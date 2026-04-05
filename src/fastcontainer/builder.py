@@ -10,7 +10,7 @@ from typing import Any
 from .models import BuildSpec, Layer, Manifest, Step
 from .btrfs import snapshot, delete, create
 from .nspawn import execute
-from .utils import run
+from .utils import run_and_capture
 
 import logging
 logger = logging.getLogger("fastcontainer")
@@ -39,7 +39,7 @@ class Builder:
 
         self.logger.info(f"🔨 Creating base '{self.spec.base.effective_name}' from command...")
 
-        temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex[:8]}"
+        temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
         self.logger.info(f"  Creating empty subvolume → {temp_name}")
@@ -49,22 +49,7 @@ class Builder:
         try:
             self.logger.info("  Executing base creation script (host, cwd = subvolume)...")
             cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
-            result = subprocess.run(
-                cmd,
-                cwd=temp_path,
-                capture_output=not self.quiet,
-                text=True,
-            )
-            if result.returncode != 0:
-                if result.stdout:
-                    sys.stdout.write(result.stdout)
-                if result.stderr:
-                    sys.stderr.write(result.stderr)
-                raise subprocess.CalledProcessError(
-                    result.returncode, cmd, result.stdout, result.stderr
-                )
-            if not self.quiet and result.stdout:
-                sys.stdout.write(result.stdout)
+            run_and_capture(cmd, quiet=self.quiet, cwd=temp_path)
 
             self.logger.info(f"✅ Base {self.spec.base.effective_name} created successfully")
 
@@ -97,7 +82,7 @@ class Builder:
 
         self.logger.info(f"\n[Step {step.index}/{len(self.spec.steps)}] RUN → new layer {layer_path.name}")
 
-        temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex[:8]}"
+        temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
         self.logger.info(f"  Creating temp snapshot → {temp_name}")
@@ -155,7 +140,7 @@ class Builder:
         else:
             self.logger.info(f"\nAll steps complete. Creating final image {self.spec.final_name}")
 
-            final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex[:8]}"
+            final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex}"
             final_temp_path = self.containers_dir / final_temp_name
 
             snapshot(current.path, final_temp_path, quiet=self.quiet)
