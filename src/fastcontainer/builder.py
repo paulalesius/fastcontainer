@@ -76,8 +76,21 @@ class Builder:
         layer_path = self._layer_path(step_hash)
 
         if layer_path.is_dir():
-            self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
-            return Layer(path=layer_path, hash=step_hash)
+            # Safety: even though layers are now profile-independent,
+            # we still verify the nspawn template matches. If not, rebuild.
+            try:
+                manifest = Manifest.from_subvolume(layer_path)
+                if manifest.nspawn_template != self.profile.nspawn:
+                    self.logger.info(
+                        f"⚠️  Cache hit step {step.index} but profile mismatch "
+                        f"(different nspawn flags) → rebuilding"
+                    )
+                    # fall through → rebuild
+                else:
+                    self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
+                    return Layer(path=layer_path, hash=step_hash)
+            except Exception:
+                pass  # no manifest or corrupt → treat as miss, rebuild
 
         self.logger.info(f"\n[Step {step.index}/{len(self.spec.steps)}] RUN → new layer {layer_path.name}")
 
@@ -127,7 +140,6 @@ class Builder:
         current = Layer.initial(
             base_path=self.containers_dir / self.spec.base.effective_name,
             base_name=self.spec.base.effective_name,
-            profile_name=self.profile.name,
         )
 
         step_logs: dict[str, dict[str, Any]] = {}

@@ -27,6 +27,11 @@ class NspawnProfile:
             name=name,
             nspawn=[str(item) for item in nspawn_raw]
         )
+    def fingerprint(self) -> str:
+        """Stable hash of the exact nspawn command template."""
+        # Sort so order in YAML doesn't matter; json is canonical
+        canonical = json.dumps(self.nspawn, sort_keys=True)
+        return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -96,11 +101,9 @@ class Layer:
     hash: str
 
     @classmethod
-    def initial(cls, base_path: Path, base_name: str, profile_name: str) -> "Layer":
-        """Start the hash chain from the base subvolume, including the profile."""
-        initial_hash = hashlib.sha1(
-            f"BASE:{base_name}:{profile_name}".encode()
-        ).hexdigest()
+    def initial(cls, base_path: Path, base_name: str) -> "Layer":
+        """Start the hash chain from the base only (profile-independent for reuse)."""
+        initial_hash = hashlib.sha1(f"BASE:{base_name}".encode()).hexdigest()
         return cls(path=base_path, hash=initial_hash)
 
 

@@ -69,9 +69,16 @@ The layer hash chain and final image name are **profile-aware**. Different profi
 Profiles
 --------
 Every build requires a `profiles:` section in the YAML. Each profile defines the exact
-`systemd-nspawn` command line (including the binary name and all flags).
+`systemd-nspawn` command line.
 
-You must specify which profile to use with the required `-p/--profile` flag.
+Layers are **shared across profiles** for maximum disk reuse. Early common steps
+(e.g. `apt-get update && apt-get upgrade`) produce identical layers regardless
+of which profile you use. Only the *final* image name is profile-aware:
+
+    <effective_base>-<profile>-<40hex_yaml>
+
+If a cached layer was built under a different nspawn configuration, fastcontainer
+will automatically rebuild it (you will see a clear warning).
 
 Example:
 ```yaml
