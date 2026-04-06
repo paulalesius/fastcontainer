@@ -1,0 +1,65 @@
+# Based on Ubuntu Noble 24.04
+base:
+  name: ubuntu24.04-cu132-llama-cpp
+  create: |
+    debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+    chroot . echo "test command inside chroot"
+
+# @TODO IMPLEMENT
+# Profiles need the nspawn command, and then a final command that is actually run inside
+# of the container after all the layers have been built. It's essentially an additional
+# final step but it never builds a layer out of it, it just runs the command
+# Example:
+# profiles:
+#   default:
+#     nspawn: # what's this for?
+#       - flags
+#     cmd:
+#       - final command?
+# @TODO Figure, through usage, if this is a good idea, or should all of the flags be shared?
+#       An idea that I've had is to have a base flags, then different profiles can add or
+#       remove flags from the base command, but it's unclear why other than for sharing flags
+#
+profiles:
+  default:
+    nspawn:
+      - "systemd-nspawn"
+      - "-D"
+      - "{{ROOT}}"
+      - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"
+
+steps:
+  # Ubuntu is minimal so we need to set it up
+  - RUN: |
+      apt-get update
+      apt install -y software-properties-common wget git
+      add-apt-repository universe -y
+      apt update && apt -y upgrade
+
+  # Set up and install CUDA
+  - RUN: |
+      wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+      echo "$(id) $(pwd)"
+      dpkg -i cuda-keyring_1.1-1_all.deb
+      apt-get update
+      apt-get -y install cuda-toolkit
+
+  # Check out llama-cpp
+  - RUN: |
+      git clone https://github.com/ggml-org/llama.cpp.git
+
+  # Prerequisites
+  - RUN: |
+      apt-get -y install cmake
+
+  # Compile llama-cpp, simple build for demonstration
+  - RUN: |
+      . /etc/profile
+      export CUDA_HOME=/usr/local/cuda
+      export PATH=$CUDA_HOME/bin:${PATH}
+      cd llama.cpp
+      cmake -B build -DGGML_CUDA=ON && \
+        cmake --build build --config Release -j $(nproc)
