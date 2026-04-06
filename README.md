@@ -76,56 +76,25 @@ This design gives you:
 
 The layer hash chain and final image name are **profile-aware**. Different profiles produce completely different hashes and final subvolume names.
 
-Profiles
+**Profiles**
 --------
-Every build requires a `profiles:` section. There is always a special `base:` (never selectable with `-p base`) that holds the common `systemd-nspawn` command/flags.
 
-Named profiles inherit from `base` and can:
+Every build requires a `profiles:` section.  
+All profiles have the same keys (`extend`, `add`, `remove`, `cmd`) and can extend each other.
 
-- `add:` new flags (appended at the end)
-- `del:` exact string matches to remove from the base list
-- `cmd:` (optional) default command to run automatically after the build finishes
+- Root profiles (no `extend`) define the full list of nspawn **flags** under `add:` (must include `-D` and `{{ROOT}}`).
+- Other profiles inherit from a parent and can `add` / `remove` flags.
 
 ```yaml
 profiles:
-  base:                          # ← special root, never selectable with -p base
-    nspawn:
-      - "systemd-nspawn"
-      - "-D"
-      - "{{ROOT}}"
-      - "--tmpfs=/var/tmp"
-      - "--private-users=no"
-      - "--resolv-conf=replace-stub"
-      - "--timezone=off"
+  default:
+    add: [...]          # full list of flags for root profile
 
-  default:                       # ← real profile
-    add:
-      - "--setenv=NVIDIA_DRIVER_CAPABILITIES=compute,utility"
-      - "--bind=/dev/nvidia0"
-      - "--bind=/dev/nvidiactl"
-      - "--bind=/dev/nvidia-uvm"
-      - "--bind=/dev/dri"
-      - "--bind=/dev/nvidia-caps"
-      - "--bind=/sys/module"
-      - "--bind-ro=/usr/lib64/libcuda.so.595.58.03"
-      - "--bind-ro=/usr/lib64/libcuda.so.1"
-      - "--bind-ro=/usr/bin/nvidia-smi"
-    del:                         # exact string match removal from base
-      - "--timezone=off"
-
-  run-llama:
-    add:
-      - "/bin/bash"
-    del: []
-    cmd:                         # ← runs automatically after build
-      - "/bin/bash"
-      - "-l"
-
-  host-network:
-    add:
-      - "--network-host"
-    del: []
-    cmd: null                    # explicit no default command
+  test:
+    extend: default
+    add: []
+    remove: []
+    cmd: null
 ```
 
 **Build with automatic post-build command** (uses profile `cmd:`):

@@ -21,9 +21,8 @@ base:
 #       remove flags from the base command, but it's unclear why other than for sharing flags
 #
 profiles:
-  base:
-    nspawn:
-      - systemd-nspawn
+  default:
+    add:
       - --property=DeviceAllow=char-nvidia rw
       - --property=DeviceAllow=char-nvidia-uvm rw
       - --property=DeviceAllow=char-nvidia-caps rw
@@ -53,11 +52,10 @@ profiles:
       - --bind-ro=/usr/lib64/libnvidia-ml.so.1
       - --bind-ro=//usr/lib64/libnvidia-allocator.so.595.58.03
       - --bind-ro=/usr/bin/nvidia-smi
-  default:
-    add: []
-    del: []
-
+  test:
+    extend: default
   run-llama:
+    extend: default
     add:
      - --bind=/home/noname/.cache/huggingface:/root/.cache/huggingface
      - --setenv=LD_LIBRARY_PATH=/usr/lib64/

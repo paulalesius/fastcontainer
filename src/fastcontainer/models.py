@@ -9,32 +9,47 @@ from typing import Any, Dict, List
 
 import yaml
 
-
 @dataclass(frozen=True)
 class NspawnProfile:
-    """nspawn execution profile definition."""
+    """nspawn execution profile definition (systemd-nspawn is implicit)."""
     name: str
-    nspawn: List[str]           # full resolved nspawn + flags
-    cmd: List[str] | None = None   # optional default command after build / when exec has no args
+    nspawn: List[str]           # full resolved list: ["systemd-nspawn", "-D", "{{ROOT}}", ...]
+    cmd: List[str] | None = None
 
     @classmethod
-    def from_base_and_deltas(
+    def from_dict(
         cls,
         name: str,
-        base_nspawn: List[str],
-        add: List[Any],
-        delete: List[Any],
-        cmd_raw: Any | None = None,
+        data: dict,
+        resolved_profiles: Dict[str, "NspawnProfile"],
     ) -> "NspawnProfile":
-        """Create profile by inheriting base + applying add/del + optional cmd."""
-        effective: List[str] = base_nspawn[:]
+        """Resolve a profile with explicit extend + add/remove."""
+        extend_name = data.get("extend")
+        add_raw = data.get("add", [])
+        remove_raw = data.get("remove", data.get("del", []))  # support old "del:" for migration
+        cmd_raw = data.get("cmd")
+
+        if not isinstance(add_raw, list):
+            raise ValueError(f"Profile '{name}' 'add:' must be a list")
+        if not isinstance(remove_raw, list):
+            raise ValueError(f"Profile '{name}' 'remove:' must be a list")
+
+        if extend_name:
+            if extend_name not in resolved_profiles:
+                raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
+            effective = resolved_profiles[extend_name].nspawn[:]
+        else:
+            # root profile: add: becomes the full flag list
+            if not add_raw:
+                raise ValueError(f"Root profile '{name}' must have a non-empty 'add:' list of flags")
+            effective = ["systemd-nspawn"] + [str(item) for item in add_raw]
 
         # exact string match removal
-        del_set = {str(item).strip() for item in delete if str(item).strip()}
-        effective = [flag for flag in effective if flag not in del_set]
+        remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
+        effective = [flag for flag in effective if flag not in remove_set]
 
         # append additions
-        for item in add:
+        for item in add_raw if extend_name else []:  # only append on derived profiles
             if item:
                 effective.append(str(item))
 
@@ -218,45 +233,17 @@ class BuildSpec:
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
             raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
 
-        if "base" not in profiles_raw:
-            raise ValueError("profiles: must contain a special 'base:' key")
-
-        base_data = profiles_raw["base"]
-        if not isinstance(base_data, dict) or "nspawn" not in base_data:
-            raise ValueError("profiles.base must contain 'nspawn:' (list of strings)")
-
-        base_nspawn_raw = base_data["nspawn"]
-        if not isinstance(base_nspawn_raw, list):
-            raise ValueError("profiles.base.nspawn must be a list of strings")
-
-        base_nspawn = [str(item) for item in base_nspawn_raw]
-
-        if "{{ROOT}}" not in " ".join(base_nspawn):
-            raise ValueError("base.nspawn must contain the '{{ROOT}}' placeholder")
-
-        profiles: Dict[str, NspawnProfile] = {}
+        # Resolve profiles (root first → derived)
+        resolved: Dict[str, NspawnProfile] = {}
         for name, data in profiles_raw.items():
-            if name == "base":
-                continue
             if not isinstance(data, dict):
                 raise ValueError(f"Profile '{name}' must be a dictionary")
+            resolved[name] = NspawnProfile.from_dict(name, data, resolved)
 
-            add_raw = data.get("add", [])
-            del_raw = data.get("del", [])
-            cmd_raw = data.get("cmd")
-
-            if not isinstance(add_raw, list):
-                raise ValueError(f"Profile '{name}' 'add:' must be a list")
-            if not isinstance(del_raw, list):
-                raise ValueError(f"Profile '{name}' 'del:' must be a list")
-
-            profiles[name] = NspawnProfile.from_base_and_deltas(
-                name=name,
-                base_nspawn=base_nspawn,
-                add=add_raw,
-                delete=del_raw,
-                cmd_raw=cmd_raw,
-            )
+        # Final validation
+        for p in resolved.values():
+            if "{{ROOT}}" not in " ".join(p.nspawn):
+                raise ValueError(f"Profile '{p.name}' is missing the required '{{ROOT}}' placeholder in flags")
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
         steps = [Step.from_dict(s, i + 1) for i, s in enumerate(steps_raw)]
@@ -266,5 +253,5 @@ class BuildSpec:
             steps=steps,
             yaml_path=yaml_path,
             yaml_hash=yaml_hash,
-            profiles=profiles,
+            profiles=resolved,
         )
