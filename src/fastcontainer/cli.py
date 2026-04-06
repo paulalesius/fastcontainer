@@ -32,7 +32,8 @@ def main() -> None:
 @click.option('-p', '--profile', required=True,
               help="Profile name from the YAML 'profiles:' section (required).")
 @click.option('-q', '--quiet', is_flag=True, help="Quiet mode: hide tool commands (only show progress + your RUN output).")
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool) -> None:
+@click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build (default: keep them for reuse).")
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, prune: bool) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn."""
     logger = setup_logger(quiet=quiet)
 
@@ -67,6 +68,7 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool) -
             containers_dir=containers_dir,
             spec=spec,
             profile=selected_profile,
+            prune=prune,
             quiet=quiet,
             logger=logger
         )

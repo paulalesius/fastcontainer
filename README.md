@@ -71,14 +71,17 @@ Profiles
 Every build requires a `profiles:` section in the YAML. Each profile defines the exact
 `systemd-nspawn` command line.
 
-Layers are **shared across profiles** for maximum disk reuse. Early common steps
-(e.g. `apt-get update && apt-get upgrade`) produce identical layers regardless
-of which profile you use. Only the *final* image name is profile-aware:
+**Intermediate layers are kept by default** for maximum reuse across different YAMLs and profiles.
+Early common steps (e.g. `apt-get update && apt-get upgrade`) are shared even if you use different
+profiles or YAML files.
+
+Only the *final* image name is profile-aware:
 
     <effective_base>-<profile>-<40hex_yaml>
 
-If a cached layer was built under a different nspawn configuration, fastcontainer
-will automatically rebuild it (you will see a clear warning).
+If you want to reclaim disk space after a build, use `--prune`:
+
+    sudo fastcontainer build ... --prune
 
 Example:
 ```yaml

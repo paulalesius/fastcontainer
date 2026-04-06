@@ -27,12 +27,6 @@ class NspawnProfile:
             name=name,
             nspawn=[str(item) for item in nspawn_raw]
         )
-    def fingerprint(self) -> str:
-        """Stable hash of the exact nspawn command template."""
-        # Sort so order in YAML doesn't matter; json is canonical
-        canonical = json.dumps(self.nspawn, sort_keys=True)
-        return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
-
 
 @dataclass(frozen=True)
 class BaseSpec:

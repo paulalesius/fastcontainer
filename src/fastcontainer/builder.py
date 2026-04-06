@@ -17,10 +17,11 @@ logger = logging.getLogger("fastcontainer")
 class Builder:
     """High-level orchestration of the layered btrfs build process."""
 
-    def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile, quiet: bool = False, logger: logging.Logger | None = None):
+    def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile, prune: bool = False, quiet: bool = False, logger: logging.Logger | None = None):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
+        self.prune = prune
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
 
@@ -178,10 +179,14 @@ class Builder:
             snapshot(final_temp_path, self.final_path, quiet=self.quiet)
             delete(final_temp_path, quiet=self.quiet)
 
-            self._prune_intermediates()
+            # Pruning is now conditional (default = keep layers for reuse)
+            if self.prune:
+                self._prune_intermediates()
+                self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned on success)")
+            else:
+                self.logger.info(f"   (Intermediate layers kept for reuse by other builds)")
 
             self.logger.info(f"✅ Successfully built: {self.final_name}")
-            self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned on success)")
 
     def _prune_intermediates(self) -> None:
         self.logger.info("\n🧹 Pruning all intermediate layers (keeping only the final image)...")
