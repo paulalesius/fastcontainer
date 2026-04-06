@@ -59,7 +59,10 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, p
         spec = BuildSpec.from_yaml(prepare_yaml)
 
         if profile not in spec.profiles:
-            logger.error(f"ERROR: Profile '{profile}' not found in YAML. Available profiles: {list(spec.profiles.keys())}")
+            if profile == "base":
+                logger.error("ERROR: 'base' is a reserved special profile (common flags) and cannot be selected with -p base")
+            else:
+                logger.error(f"ERROR: Profile '{profile}' not found in YAML. Available profiles: {list(spec.profiles.keys())}")
             sys.exit(1)
 
         selected_profile = spec.profiles[profile]

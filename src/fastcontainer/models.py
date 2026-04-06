@@ -14,19 +14,31 @@ import yaml
 class NspawnProfile:
     """nspawn execution profile definition."""
     name: str
-    nspawn: List[str]   # full command template containing {{ROOT}}
+    nspawn: List[str]   # full *resolved* command template containing {{ROOT}}
 
     @classmethod
-    def from_data(cls, name: str, data: Any) -> "NspawnProfile":
-        if not isinstance(data, dict) or "nspawn" not in data:
-            raise ValueError(f"Profile '{name}' must contain 'nspawn:' key (list of strings)")
-        nspawn_raw = data["nspawn"]
-        if not isinstance(nspawn_raw, list):
-            raise ValueError(f"Profile '{name}' nspawn must be a list of strings")
-        return cls(
-            name=name,
-            nspawn=[str(item) for item in nspawn_raw]
-        )
+    def from_base_and_deltas(
+        cls,
+        name: str,
+        base_nspawn: List[str],
+        add: List[Any],
+        delete: List[Any],
+    ) -> "NspawnProfile":
+        """Create profile by inheriting base + applying add/del deltas."""
+        # copy base
+        effective: List[str] = base_nspawn[:]
+
+        # exact string match removal (order-preserving)
+        del_set = {str(item) for item in delete if str(item).strip()}
+        effective = [flag for flag in effective if flag not in del_set]
+
+        # append additions
+        for item in add:
+            if item:  # skip empty
+                effective.append(str(item))
+
+        return cls(name=name, nspawn=effective)
+
 
 @dataclass(frozen=True)
 class BaseSpec:
@@ -38,7 +50,7 @@ class BaseSpec:
 
     @classmethod
     def from_data(cls, data: Any) -> "BaseSpec":
-        """Parse base: string or object with create command."""
+        """Parse base: string or object with creation script."""
         if isinstance(data, str):
             if not data.strip():
                 raise ValueError("base cannot be empty")
@@ -58,7 +70,6 @@ class BaseSpec:
                 cmd_str = "\n".join(create_raw) if isinstance(create_raw, list) else str(create_raw)
                 create_cmd = cmd_str.strip()
                 if create_cmd:
-                    # 16 char hash keeps names readable
                     h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
                     effective_name = f"{name}-{h}"
 
@@ -185,7 +196,7 @@ class BuildSpec:
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
-        """Load and validate the YAML."""
+        """Load and validate the YAML (new profiles inheritance syntax)."""
         if not yaml_path.is_file():
             raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
 
@@ -202,14 +213,49 @@ class BuildSpec:
         if not isinstance(steps_raw, list):
             raise ValueError("'steps:' must be a list")
 
-        # Profiles section is now required
+        # ── NEW PROFILES PARSING ─────────────────────────────────────
         profiles_raw = spec.get("profiles")
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
             raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
 
+        if "base" not in profiles_raw:
+            raise ValueError("profiles: must contain a special 'base:' key (common nspawn flags)")
+
+        base_data = profiles_raw["base"]
+        if not isinstance(base_data, dict) or "nspawn" not in base_data:
+            raise ValueError("profiles.base must be a dict containing 'nspawn:' (list of strings)")
+
+        base_nspawn_raw = base_data["nspawn"]
+        if not isinstance(base_nspawn_raw, list):
+            raise ValueError("profiles.base.nspawn must be a list of strings")
+
+        base_nspawn = [str(item) for item in base_nspawn_raw]
+
+        if "{{ROOT}}" not in " ".join(base_nspawn):
+            raise ValueError("base.nspawn must contain the '{{ROOT}}' placeholder")
+
+        # Parse selectable profiles (inherit from base)
         profiles: Dict[str, NspawnProfile] = {}
         for name, data in profiles_raw.items():
-            profiles[name] = NspawnProfile.from_data(name, data)
+            if name == "base":
+                continue
+            if not isinstance(data, dict):
+                raise ValueError(f"Profile '{name}' must be a dictionary (with optional 'add:' / 'del:')")
+
+            add_raw = data.get("add", [])
+            del_raw = data.get("del", [])
+            if not isinstance(add_raw, list):
+                raise ValueError(f"Profile '{name}' 'add:' must be a list")
+            if not isinstance(del_raw, list):
+                raise ValueError(f"Profile '{name}' 'del:' must be a list")
+
+            profiles[name] = NspawnProfile.from_base_and_deltas(
+                name=name,
+                base_nspawn=base_nspawn,
+                add=add_raw,
+                delete=del_raw,
+            )
+        # ─────────────────────────────────────────────────────────────
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
 

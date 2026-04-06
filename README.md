@@ -68,25 +68,11 @@ The layer hash chain and final image name are **profile-aware**. Different profi
 
 Profiles
 --------
-Every build requires a `profiles:` section in the YAML. Each profile defines the exact
-`systemd-nspawn` command line.
+Every build now requires a `profiles:` section. There is always a special `base:` (not selectable) that holds the common `systemd-nspawn` command/flags. Named profiles inherit from it and can `add` / `del` flags.
 
-**Intermediate layers are kept by default** for maximum reuse across different YAMLs and profiles.
-Early common steps (e.g. `apt-get update && apt-get upgrade`) are shared even if you use different
-profiles or YAML files.
-
-Only the *final* image name is profile-aware:
-
-    <effective_base>-<profile>-<40hex_yaml>
-
-If you want to reclaim disk space after a build, use `--prune`:
-
-    sudo fastcontainer build ... --prune
-
-Example:
 ```yaml
 profiles:
-  default:
+  base:                          # ← special root, never selectable with -p base
     nspawn:
       - "systemd-nspawn"
       - "-D"
@@ -95,17 +81,37 @@ profiles:
       - "--private-users=no"
       - "--resolv-conf=replace-stub"
       - "--timezone=off"
+
+  default:                       # ← real profile
+    add:
+      - "--setenv=NVIDIA_DRIVER_CAPABILITIES=compute,utility"
+      - "--bind=/dev/nvidia0"
+      - "--bind=/dev/nvidiactl"
+      - "--bind=/dev/nvidia-uvm"
+      - "--bind=/dev/dri"
+      - "--bind=/dev/nvidia-caps"
+      - "--bind=/sys/module"
+      - "--bind-ro=/usr/lib64/libcuda.so.595.58.03"
+      - "--bind-ro=/usr/lib64/libcuda.so.1"
+      - "--bind-ro=/usr/bin/nvidia-smi"
+    del:                         # exact string match removal from base
+      - "--timezone=off"
+
+  cuda-llama:
+    add:
+      - "--property=DeviceAllow=char-nvidia rw"
+      - "--property=DeviceAllow=char-nvidia-uvm rw"
+      - "--property=DeviceAllow=char-nvidia-caps rw"
+      - "--property=DeviceAllow=char-drm rw"
+      - "--property=DeviceAllow=char-nvidia-caps-imex-channels rw"
+      - "--property=DeviceAllow=char-nvidiactl rw"
+      - "--setenv=NVIDIA_VISIBLE_DEVICES=0"
+    del: []
+
   host-network:
-    nspawn:
-      - "systemd-nspawn"
-      - "-D"
-      - "{{ROOT}}"
+    add:
       - "--network-host"
-      - "--tmpfs=/var/tmp"
-      - "--private-users=no"
-      - "--resolv-conf=replace-stub"
-      - "--timezone=off"
-```
+    del: []
 
 Contributing & Development
 --------------------------
