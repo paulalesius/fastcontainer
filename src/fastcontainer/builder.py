@@ -125,12 +125,14 @@ class Builder:
     def build(self) -> None:
         if self.final_path.is_dir():
             self.logger.info(f"✅ {self.final_name} already exists. Nothing to do.")
-            # Still run post-build command if one was explicitly given on CLI
-            if self.post_build_cmd:
-                self.logger.info(f"→ Running explicit post-build command: {' '.join(self.post_build_cmd)}")
+
+            # CLI override > profile.cmd  (same logic we already use after a fresh build)
+            cmd_to_run = self.post_build_cmd or self.profile.cmd
+            if cmd_to_run:
+                self.logger.info(f"→ Running post-build command: {' '.join(cmd_to_run)}")
                 exec_in_container(
                     root=self.final_path,
-                    command=self.post_build_cmd,
+                    command=cmd_to_run,
                     nspawn_template=self.profile.nspawn,
                     quiet=self.quiet
                 )

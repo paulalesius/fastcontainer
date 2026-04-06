@@ -58,11 +58,14 @@ profiles:
     del: []
 
   run-llama:
-    add: []
+    add:
+     - --bind=/home/noname/.cache/huggingface:/root/.cache/huggingface
+     - --setenv=LD_LIBRARY_PATH=/usr/lib64/
     del: []
     cmd:
-      - /bin/bash
-      - -l
+      - /llama.cpp/build/bin/llama-bench
+      - -hf
+      - unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
 
 steps:
   # Ubuntu is minimal so we need to set it up
