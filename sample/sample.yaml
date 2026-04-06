@@ -1,5 +1,3 @@
-# Want to also support a "command:" so that base can be built out of a command
-# Then the first layer of the container will be a hash
 base:
   name: ubuntu-custom
   create: |
