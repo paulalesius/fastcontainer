@@ -60,6 +60,9 @@ profiles:
   run-llama:
     add: []
     del: []
+    cmd:
+      - /bin/bash
+      - -l
 
 steps:
   # Ubuntu is minimal so we need to set it up

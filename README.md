@@ -10,23 +10,33 @@ A lightweight, fast, and minimal container builder using btrfs subvolumes and sy
 Usage
 -----
 
-Build a container:
-    sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-q]
+Build a container (with optional post-build command):
+
+    sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-q] [--prune] [-- <command...>]
 
 Run a command inside a built container:
+
     sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-q]
 
 Interactive shell example:
+
     sudo fastcontainer exec <containers_dir> <image-name> -- bash -l
 
 Examples:
+
     sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default
+
+    # Build and automatically drop into bash (uses profile's cmd:)
+    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
+
+    # Override profile cmd: with your own command
+    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
+
+    # One-off command on an already-built image
+    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p default -- ls -la /
 
     # Run a one-off command
     sudo fastcontainer exec /disk/containers ubuntu-custom-default-1a2b3c... -- apt-get install -y htop
-
-    # Open an interactive shell
-    sudo fastcontainer exec /disk/containers ubuntu-custom-default-1a2b3c... -- bash -l
 
 The image name is the final subvolume name printed at the end of a successful build
 (e.g. `ubuntu-custom-default-abc123def456...`).
@@ -68,7 +78,13 @@ The layer hash chain and final image name are **profile-aware**. Different profi
 
 Profiles
 --------
-Every build now requires a `profiles:` section. There is always a special `base:` (not selectable) that holds the common `systemd-nspawn` command/flags. Named profiles inherit from it and can `add` / `del` flags.
+Every build requires a `profiles:` section. There is always a special `base:` (never selectable with `-p base`) that holds the common `systemd-nspawn` command/flags.
+
+Named profiles inherit from `base` and can:
+
+- `add:` new flags (appended at the end)
+- `del:` exact string matches to remove from the base list
+- `cmd:` (optional) default command to run automatically after the build finishes
 
 ```yaml
 profiles:
@@ -97,26 +113,39 @@ profiles:
     del:                         # exact string match removal from base
       - "--timezone=off"
 
-  cuda-llama:
+  run-llama:
     add:
-      - "--property=DeviceAllow=char-nvidia rw"
-      - "--property=DeviceAllow=char-nvidia-uvm rw"
-      - "--property=DeviceAllow=char-nvidia-caps rw"
-      - "--property=DeviceAllow=char-drm rw"
-      - "--property=DeviceAllow=char-nvidia-caps-imex-channels rw"
-      - "--property=DeviceAllow=char-nvidiactl rw"
-      - "--setenv=NVIDIA_VISIBLE_DEVICES=0"
+      - "/bin/bash"
     del: []
+    cmd:                         # ← runs automatically after build
+      - "/bin/bash"
+      - "-l"
 
   host-network:
     add:
       - "--network-host"
     del: []
+    cmd: null                    # explicit no default command
+```
+
+**Build with automatic post-build command** (uses profile `cmd:`):
+
+    sudo fastcontainer build /disk/containers ./prepare.yaml -p run-llama
+
+**Override with your own command** (CLI wins):
+
+    sudo fastcontainer build /disk/containers ./prepare.yaml -p run-llama -- /bin/bash -l
+
+The final image name remains profile-aware: `<effective_base>-<profile>-<40hex_yaml>`.
+
+If you want to reclaim disk space after a build, use `--prune`:
+
+    sudo fastcontainer build ... --prune
 
 Contributing & Development
 --------------------------
 Developers wanting to take part in the project can create feature requests or issues through GitHub.
 
 To ask the project questions in an LLM prompt, simply run:
-./scr/project-to-prompt.sh
+./scripts/project-to-prompt.sh
 This script collects all source files into a clean, ready-to-paste format.

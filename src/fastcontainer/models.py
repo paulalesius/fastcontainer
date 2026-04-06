@@ -14,7 +14,8 @@ import yaml
 class NspawnProfile:
     """nspawn execution profile definition."""
     name: str
-    nspawn: List[str]   # full *resolved* command template containing {{ROOT}}
+    nspawn: List[str]           # full resolved nspawn + flags
+    cmd: List[str] | None = None   # optional default command after build / when exec has no args
 
     @classmethod
     def from_base_and_deltas(
@@ -23,34 +24,42 @@ class NspawnProfile:
         base_nspawn: List[str],
         add: List[Any],
         delete: List[Any],
+        cmd_raw: Any | None = None,
     ) -> "NspawnProfile":
-        """Create profile by inheriting base + applying add/del deltas."""
-        # copy base
+        """Create profile by inheriting base + applying add/del + optional cmd."""
         effective: List[str] = base_nspawn[:]
 
-        # exact string match removal (order-preserving)
-        del_set = {str(item) for item in delete if str(item).strip()}
+        # exact string match removal
+        del_set = {str(item).strip() for item in delete if str(item).strip()}
         effective = [flag for flag in effective if flag not in del_set]
 
         # append additions
         for item in add:
-            if item:  # skip empty
+            if item:
                 effective.append(str(item))
 
-        return cls(name=name, nspawn=effective)
+        # normalize cmd
+        cmd: List[str] | None = None
+        if cmd_raw:
+            if isinstance(cmd_raw, str):
+                cmd = [cmd_raw]
+            elif isinstance(cmd_raw, list):
+                cmd = [str(x) for x in cmd_raw if str(x).strip()]
+            else:
+                raise ValueError(f"Profile '{name}' cmd: must be a string or list of strings")
+
+        return cls(name=name, nspawn=effective, cmd=cmd)
 
 
 @dataclass(frozen=True)
 class BaseSpec:
     """Base image specification - can be pre-existing or built via command."""
-    name: str                    # user-friendly name (ubuntu-noble)
+    name: str
     create_cmd: str | None = None
-    effective_name: str = ""     # actual subvolume name on disk (with hash if created)
-
+    effective_name: str = ""
 
     @classmethod
     def from_data(cls, data: Any) -> "BaseSpec":
-        """Parse base: string or object with creation script."""
         if isinstance(data, str):
             if not data.strip():
                 raise ValueError("base cannot be empty")
@@ -73,18 +82,13 @@ class BaseSpec:
                     h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
                     effective_name = f"{name}-{h}"
 
-            return cls(
-                name=name,
-                create_cmd=create_cmd,
-                effective_name=effective_name
-            )
+            return cls(name=name, create_cmd=create_cmd, effective_name=effective_name)
 
         raise ValueError("base must be a string or dict with 'name' key")
 
 
 @dataclass(frozen=True)
 class Step:
-    """A single build step (currently only RUN is supported)."""
     index: int
     raw: Dict[str, Any]
     cmd: str | None = None
@@ -101,26 +105,24 @@ class Step:
 
 @dataclass(frozen=True)
 class Layer:
-    """Represents one layer in the hash chain (used during build)."""
     path: Path
     hash: str
 
     @classmethod
     def initial(cls, base_path: Path, base_name: str) -> "Layer":
-        """Start the hash chain from the base only (profile-independent for reuse)."""
         initial_hash = hashlib.sha1(f"BASE:{base_name}".encode()).hexdigest()
         return cls(path=base_path, hash=initial_hash)
 
 
 @dataclass
 class Manifest:
-    """Data written to /fastcontainer.json inside every layer and the final image."""
     base: str
     yaml_file: str
     yaml_hash: str
     final_name: str
     profile: str
     nspawn_template: List[str]
+    default_cmd: List[str] | None
     stage: str
     steps: int
     built_at: str
@@ -135,6 +137,7 @@ class Manifest:
             "final_name": self.final_name,
             "profile": self.profile,
             "nspawn_template": self.nspawn_template,
+            "default_cmd": self.default_cmd,
             "stage": self.stage,
             "steps": self.steps,
             "built_at": self.built_at,
@@ -146,7 +149,6 @@ class Manifest:
     def from_spec(cls, spec: BuildSpec, profile: NspawnProfile, final_name: str,
                   completed_logs: Dict[str, Dict[str, Any]] | None = None,
                   stage: str = "final") -> "Manifest":
-        """Create manifest for a layer (partial) or final image (full)."""
         if completed_logs is None:
             completed_logs = {}
 
@@ -157,6 +159,7 @@ class Manifest:
             final_name=final_name,
             profile=profile.name,
             nspawn_template=profile.nspawn[:],
+            default_cmd=profile.cmd,
             stage=stage,
             steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
@@ -165,7 +168,6 @@ class Manifest:
 
     @classmethod
     def from_subvolume(cls, path: Path) -> "Manifest":
-        """Load manifest from a built container (used by exec)."""
         manifest_path = path / "fastcontainer.json"
         if not manifest_path.is_file():
             raise FileNotFoundError(f"No fastcontainer.json found in {path}")
@@ -178,6 +180,7 @@ class Manifest:
             final_name=data["final_name"],
             profile=data["profile"],
             nspawn_template=data["nspawn_template"],
+            default_cmd=data.get("default_cmd"),
             stage=data["stage"],
             steps=data["steps"],
             built_at=data["built_at"],
@@ -187,7 +190,6 @@ class Manifest:
 
 @dataclass(frozen=True)
 class BuildSpec:
-    """Complete build specification parsed from prepare.yaml."""
     base: BaseSpec
     steps: List[Step]
     yaml_path: Path
@@ -196,7 +198,6 @@ class BuildSpec:
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
-        """Load and validate the YAML (new profiles inheritance syntax)."""
         if not yaml_path.is_file():
             raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
 
@@ -213,17 +214,16 @@ class BuildSpec:
         if not isinstance(steps_raw, list):
             raise ValueError("'steps:' must be a list")
 
-        # ── NEW PROFILES PARSING ─────────────────────────────────────
         profiles_raw = spec.get("profiles")
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
             raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
 
         if "base" not in profiles_raw:
-            raise ValueError("profiles: must contain a special 'base:' key (common nspawn flags)")
+            raise ValueError("profiles: must contain a special 'base:' key")
 
         base_data = profiles_raw["base"]
         if not isinstance(base_data, dict) or "nspawn" not in base_data:
-            raise ValueError("profiles.base must be a dict containing 'nspawn:' (list of strings)")
+            raise ValueError("profiles.base must contain 'nspawn:' (list of strings)")
 
         base_nspawn_raw = base_data["nspawn"]
         if not isinstance(base_nspawn_raw, list):
@@ -234,16 +234,17 @@ class BuildSpec:
         if "{{ROOT}}" not in " ".join(base_nspawn):
             raise ValueError("base.nspawn must contain the '{{ROOT}}' placeholder")
 
-        # Parse selectable profiles (inherit from base)
         profiles: Dict[str, NspawnProfile] = {}
         for name, data in profiles_raw.items():
             if name == "base":
                 continue
             if not isinstance(data, dict):
-                raise ValueError(f"Profile '{name}' must be a dictionary (with optional 'add:' / 'del:')")
+                raise ValueError(f"Profile '{name}' must be a dictionary")
 
             add_raw = data.get("add", [])
             del_raw = data.get("del", [])
+            cmd_raw = data.get("cmd")
+
             if not isinstance(add_raw, list):
                 raise ValueError(f"Profile '{name}' 'add:' must be a list")
             if not isinstance(del_raw, list):
@@ -254,11 +255,10 @@ class BuildSpec:
                 base_nspawn=base_nspawn,
                 add=add_raw,
                 delete=del_raw,
+                cmd_raw=cmd_raw,
             )
-        # ─────────────────────────────────────────────────────────────
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
-
         steps = [Step.from_dict(s, i + 1) for i, s in enumerate(steps_raw)]
 
         return cls(

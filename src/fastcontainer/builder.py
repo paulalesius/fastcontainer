@@ -3,11 +3,11 @@ import uuid
 import sys
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 from .models import BuildSpec, Layer, Manifest, Step, NspawnProfile
 from .btrfs import snapshot, delete, create
-from .nspawn import execute
+from .nspawn import execute, exec_in_container
 from .utils import run_and_capture
 
 import logging
@@ -17,15 +17,17 @@ logger = logging.getLogger("fastcontainer")
 class Builder:
     """High-level orchestration of the layered btrfs build process."""
 
-    def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile, prune: bool = False, quiet: bool = False, logger: logging.Logger | None = None):
+    def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
+                 prune: bool = False, quiet: bool = False, logger: logging.Logger | None = None,
+                 post_build_cmd: List[str] | None = None):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
         self.prune = prune
         self.quiet = quiet
         self.logger = logger or logging.getLogger("fastcontainer")
+        self.post_build_cmd = post_build_cmd
 
-        # Final name is now profile-aware (exactly as the README describes)
         self.final_name = f"{spec.base.effective_name}-{profile.name}-{spec.yaml_hash}"
         self.final_path = self.containers_dir / self.final_name
 
@@ -123,6 +125,16 @@ class Builder:
     def build(self) -> None:
         if self.final_path.is_dir():
             self.logger.info(f"✅ {self.final_name} already exists. Nothing to do.")
+            # Still run post-build command if one was explicitly given on CLI
+            if self.post_build_cmd:
+                self.logger.info(f"→ Running explicit post-build command: {' '.join(self.post_build_cmd)}")
+                exec_in_container(
+                    root=self.final_path,
+                    command=self.post_build_cmd,
+                    nspawn_template=self.profile.nspawn,
+                    quiet=self.quiet
+                )
+                self.logger.info("✅ Post-build command finished")
             return
 
         self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.final_name} (profile: {self.profile.name})")
@@ -143,7 +155,6 @@ class Builder:
                 except Exception as e:
                     self.logger.error(f"❌ Build failed at step {step.index}.")
                     self.logger.info("   Previous layers are cached and safe.")
-                    self.logger.info("   Temporary volume (if any) kept for debugging.")
                     raise
         except Exception:
             raise
@@ -157,7 +168,7 @@ class Builder:
 
             manifest = Manifest.from_spec(
                 self.spec,
-                profile=self.profile,                # ← fixed
+                profile=self.profile,
                 final_name=self.final_name,
                 completed_logs=step_logs,
                 stage="final"
@@ -170,7 +181,6 @@ class Builder:
             snapshot(final_temp_path, self.final_path, quiet=self.quiet)
             delete(final_temp_path, quiet=self.quiet)
 
-            # Pruning is now conditional (default = keep layers for reuse)
             if self.prune:
                 self._prune_intermediates()
                 self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned on success)")
@@ -178,6 +188,19 @@ class Builder:
                 self.logger.info(f"   (Intermediate layers kept for reuse by other builds)")
 
             self.logger.info(f"✅ Successfully built: {self.final_name}")
+
+            # ── Run post-build command (CLI override > profile.cmd) ─────────────────
+            cmd_to_run = self.post_build_cmd or self.profile.cmd
+            if cmd_to_run:
+                self.logger.info(f"→ Running post-build command: {' '.join(cmd_to_run)}")
+                exec_in_container(
+                    root=self.final_path,
+                    command=cmd_to_run,
+                    nspawn_template=self.profile.nspawn,
+                    quiet=self.quiet
+                )
+                self.logger.info("✅ Post-build command finished")
+            # ────────────────────────────────────────────────────────────────
 
     def _prune_intermediates(self) -> None:
         self.logger.info("\n🧹 Pruning all intermediate layers (keeping only the final image)...")

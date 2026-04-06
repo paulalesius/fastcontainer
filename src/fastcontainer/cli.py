@@ -33,16 +33,19 @@ def main() -> None:
               help="Profile name from the YAML 'profiles:' section (required).")
 @click.option('-q', '--quiet', is_flag=True, help="Quiet mode: hide tool commands (only show progress + your RUN output).")
 @click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build (default: keep them for reuse).")
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, prune: bool) -> None:
-    """Build a container from a prepare.yaml using btrfs subvolumes + nspawn."""
+@click.argument("command", nargs=-1, type=click.UNPROCESSED, required=False)
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, prune: bool, command: tuple[str, ...]) -> None:
+    """Build a container from a prepare.yaml using btrfs subvolumes + nspawn.
+
+    Optional trailing command (after --) will be executed inside the final image:
+        fastcontainer build ... -p run-llama -- /bin/bash -l
+    """
     logger = setup_logger(quiet=quiet)
 
-    # Root check
     if os.geteuid() != 0:
         logger.error("ERROR: This program must be run as root (use sudo)")
         sys.exit(1)
 
-    # Single-build lock
     lock_path = containers_dir / ".fastcontainer.lock"
     lock_fd = None
     try:
@@ -67,13 +70,17 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, p
 
         selected_profile = spec.profiles[profile]
 
+        # CLI command overrides profile.cmd
+        post_cmd = list(command) if command else None
+
         builder = Builder(
             containers_dir=containers_dir,
             spec=spec,
             profile=selected_profile,
             prune=prune,
             quiet=quiet,
-            logger=logger
+            logger=logger,
+            post_build_cmd=post_cmd,
         )
         builder.build()
     except Exception as e:
@@ -113,7 +120,7 @@ def exec(containers_dir: Path, image: str, quiet: bool, command: tuple[str, ...]
 
     exec_in_container(
         root=container_path,
-        command=list(command),          # ← direct argv (perfect for complex commands)
+        command=list(command),
         nspawn_template=manifest.nspawn_template,
         quiet=quiet
     )
