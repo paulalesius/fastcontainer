@@ -34,13 +34,13 @@ class Builder:
         base_path = self.containers_dir / self.spec.base.effective_name
 
         if base_path.is_dir():
-            self.logger.info(f"✅ Using existing base: {self.spec.base.effective_name}")
+            self.logger.info(f"[OK] Using existing base: {self.spec.base.effective_name}")
             return
 
         if not self.spec.base.create_cmd:
             raise FileNotFoundError(f"Base subvolume not found: {base_path}")
 
-        self.logger.info(f"🔨 Creating base '{self.spec.base.effective_name}' from command...")
+        self.logger.info(f"[BUILD] Creating base '{self.spec.base.effective_name}' from command...")
 
         temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
@@ -53,7 +53,7 @@ class Builder:
             cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
             run_and_capture(cmd, quiet=self.quiet, cwd=temp_path)
 
-            self.logger.info(f"✅ Base {self.spec.base.effective_name} created successfully")
+            self.logger.info(f"[OK] Base {self.spec.base.effective_name} created successfully")
 
             snapshot(temp_path, base_path, quiet=self.quiet)
 
@@ -77,28 +77,19 @@ class Builder:
         layer_path = self._layer_path(step_hash)
 
         if layer_path.is_dir():
-            # Safety: even though layers are now profile-independent,
-            # we still verify the nspawn template matches. If not, rebuild.
-            try:
-                manifest = Manifest.from_subvolume(layer_path)
-                if manifest.nspawn_template != self.profile.nspawn:
-                    self.logger.info(
-                        f"⚠️  Cache hit step {step.index} but profile mismatch "
-                        f"(different nspawn flags) → rebuilding"
-                    )
-                    # fall through → rebuild
-                else:
-                    self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
-                    return Layer(path=layer_path, hash=step_hash)
-            except Exception:
-                pass  # no manifest or corrupt → treat as miss, rebuild
+            # Pure content-based caching. Layers are profile-independent by design.
+            # nspawn flags only affect how we *execute* the step, not the resulting filesystem
+            # for typical RUN commands (apt, git, cmake, etc.).
+            self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
+            return Layer(path=layer_path, hash=step_hash)
 
-        self.logger.info(f"\n[Step {step.index}/{len(self.spec.steps)}] RUN → new layer {layer_path.name}")
+        self.logger.info(f"\n[Step {step.index}/{len(self.spec.steps)}] RUN -> new layer {layer_path.name}")
+        self.logger.info(f"    Command:\n{step.cmd}")
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
-        self.logger.info(f"  Creating temp snapshot → {temp_name}")
+        self.logger.info(f"  Creating temp snapshot -> {temp_name}")
         snapshot(previous.path, temp_path, quiet=self.quiet)
 
         self.logger.info(f"  Executing step {step.index}...")
@@ -108,7 +99,7 @@ class Builder:
             "command": step.cmd,
             "output": output.splitlines()
         }
-        self.logger.info(f"  ✓ Step {step.index} finished (output embedded in manifest)")
+        self.logger.info(f"  [OK] Step {step.index} finished")
 
         # Write per-layer manifest (self-describing + clearly marked intermediate)
         manifest = Manifest.from_spec(
@@ -126,7 +117,7 @@ class Builder:
         snapshot(temp_path, layer_path, quiet=self.quiet)
         delete(temp_path, quiet=self.quiet)
 
-        self.logger.info(f"  ✓ Layer {layer_path.name} created")
+        self.logger.info(f"  [OK] Layer {layer_path.name} created")
         return Layer(path=layer_path, hash=step_hash)
 
     def build(self) -> None:

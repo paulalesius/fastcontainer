@@ -10,12 +10,13 @@ def execute(root: Path, command: str, nspawn_template: List[str], quiet: bool = 
     in a multi-line RUN stops the build immediately.
     """
     # Prepend strict mode (same as Docker/Buildah do)
-    strict_script = f"set -euo pipefail\n{command}"
+    strict_script = f"set -eo pipefail\n{command}"
 
     # Replace placeholder {{ROOT}} with actual container root path
     args = [arg.replace("{{ROOT}}", str(root)) for arg in nspawn_template]
 
-    if quiet and "--quiet" not in args:
+    # Always quiet nspawn itself — we control output
+    if "--quiet" not in args:
         args.append("--quiet")
 
     args += ["/bin/bash", "-l", "-c", strict_script]

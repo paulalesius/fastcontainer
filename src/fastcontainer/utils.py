@@ -17,7 +17,7 @@ def run(
     (so the "→ btrfs ..." arrows disappear).
     """
     if not quiet:
-        logger.debug("→ " + " ".join(map(str, cmd)))
+        logger.debug("-> " + " ".join(map(str, cmd)))
 
     if quiet and capture_output:
         result = subprocess.run(cmd, capture_output=True, text=True)

@@ -23,19 +23,42 @@ base:
 profiles:
   default:
     nspawn:
-      - "systemd-nspawn"
-      - "-D"
+      - systemd-nspawn
+      - --property=DeviceAllow=char-nvidia rw
+      - --property=DeviceAllow=char-nvidia-uvm rw
+      - --property=DeviceAllow=char-nvidia-caps rw
+      - --property=DeviceAllow=char-drm rw
+      - --property=DeviceAllow=char-nvidia-caps-imex-channels rw
+      - --property=DeviceAllow=char-nvidiactl rw
+      - -D
       - "{{ROOT}}"
-      - "--tmpfs=/var/tmp"
-      - "--private-users=no"
-      - "--resolv-conf=replace-stub"
-      - "--timezone=off"
+      - --tmpfs=/var/tmp
+      - --private-users=no
+      - --resolv-conf=replace-stub
+      - --timezone=off
+      # Focus on one GPU, but one can specify: --setenv=NVIDIA_VISIBLE_DEVICES=0,1
+      - --setenv=NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # There may be additional cards, nvidia1 etc
+      - --bind=/dev/nvidia0
+      - --bind=/dev/nvidiactl
+      - --bind=/dev/nvidia-uvm
+      - --bind=/dev/dri
+      - --bind=/dev/nvidia-caps
+      - --bind=/sys/module
+      # Bind NVIDIA Driver infrastructure from the host as we don't install the driver inside of the container
+      # This is required when building things because they link to the driver
+      - --bind-ro=/usr/lib64/libcuda.so.595.58.03
+      - --bind-ro=/usr/lib64/libcuda.so.1
+      - --bind-ro=/usr/lib64/libnvidia-ml.so.595.58.03
+      - --bind-ro=/usr/lib64/libnvidia-ml.so.1
+      - --bind-ro=//usr/lib64/libnvidia-allocator.so.595.58.03
+      - --bind-ro=/usr/bin/nvidia-smi
 
 steps:
   # Ubuntu is minimal so we need to set it up
   - RUN: |
       apt-get update
-      apt install -y software-properties-common wget git
+      apt install -y software-properties-common wget git ncurses-term libssl-dev cmake
       add-apt-repository universe -y
       apt update && apt -y upgrade
 
@@ -51,15 +74,13 @@ steps:
   - RUN: |
       git clone https://github.com/ggml-org/llama.cpp.git
 
-  # Prerequisites
-  - RUN: |
-      apt-get -y install cmake
-
   # Compile llama-cpp, simple build for demonstration
   - RUN: |
       . /etc/profile
       export CUDA_HOME=/usr/local/cuda
       export PATH=$CUDA_HOME/bin:${PATH}
+      export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
       cd llama.cpp
+      /usr/bin/nvidia-smi
       cmake -B build -DGGML_CUDA=ON && \
         cmake --build build --config Release -j $(nproc)
