@@ -19,7 +19,7 @@ class Builder:
 
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
                  prune: bool = False, quiet: bool = False, logger: logging.Logger | None = None,
-                 post_build_cmd: List[str] | None = None):
+                 post_build_cmd: List[str] | str | None = None):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
@@ -30,6 +30,22 @@ class Builder:
 
         self.final_name = f"{spec.base.effective_name}-{profile.name}-{spec.yaml_hash}"
         self.final_path = self.containers_dir / self.final_name
+
+    def _run_post_build(self, cmd: List[str] | str | None) -> None:
+        """Unified helper for post-build command (CLI override or profile.cmd)."""
+        if not cmd:
+            return
+        if isinstance(cmd, str):
+            self.logger.info(f"→ Running post-build script:\n{cmd.strip()}")
+        else:
+            self.logger.info(f"→ Running post-build command: {' '.join(map(str, cmd))}")
+        exec_in_container(
+            root=self.final_path,
+            command=cmd,
+            nspawn_template=self.profile.nspawn,
+            quiet=self.quiet
+        )
+        self.logger.info("✅ Post-build command finished")
 
     def _ensure_base_exists(self) -> None:
         """Create base subvolume from command if it doesn't exist (cached by hash)."""
@@ -79,9 +95,6 @@ class Builder:
         layer_path = self._layer_path(step_hash)
 
         if layer_path.is_dir():
-            # Pure content-based caching. Layers are profile-independent by design.
-            # nspawn flags only affect how we *execute* the step, not the resulting filesystem
-            # for typical RUN commands (apt, git, cmake, etc.).
             self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
             return Layer(path=layer_path, hash=step_hash)
 
@@ -106,7 +119,7 @@ class Builder:
         # Write per-layer manifest (self-describing + clearly marked intermediate)
         manifest = Manifest.from_spec(
             self.spec,
-            profile=self.profile,                    # ← fixed
+            profile=self.profile,
             final_name=self.final_name,
             completed_logs=dict(current_logs),
             stage="intermediate"
@@ -125,18 +138,8 @@ class Builder:
     def build(self) -> None:
         if self.final_path.is_dir():
             self.logger.info(f"✅ {self.final_name} already exists. Nothing to do.")
-
-            # CLI override > profile.cmd  (same logic we already use after a fresh build)
-            cmd_to_run = self.post_build_cmd or self.profile.cmd
-            if cmd_to_run:
-                self.logger.info(f"→ Running post-build command: {' '.join(cmd_to_run)}")
-                exec_in_container(
-                    root=self.final_path,
-                    command=cmd_to_run,
-                    nspawn_template=self.profile.nspawn,
-                    quiet=self.quiet
-                )
-                self.logger.info("✅ Post-build command finished")
+            cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
+            self._run_post_build(cmd_to_run)
             return
 
         self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.final_name} (profile: {self.profile.name})")
@@ -192,16 +195,8 @@ class Builder:
             self.logger.info(f"✅ Successfully built: {self.final_name}")
 
             # ── Run post-build command (CLI override > profile.cmd) ─────────────────
-            cmd_to_run = self.post_build_cmd or self.profile.cmd
-            if cmd_to_run:
-                self.logger.info(f"→ Running post-build command: {' '.join(cmd_to_run)}")
-                exec_in_container(
-                    root=self.final_path,
-                    command=cmd_to_run,
-                    nspawn_template=self.profile.nspawn,
-                    quiet=self.quiet
-                )
-                self.logger.info("✅ Post-build command finished")
+            cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
+            self._run_post_build(cmd_to_run)
             # ────────────────────────────────────────────────────────────────
 
     def _prune_intermediates(self) -> None:

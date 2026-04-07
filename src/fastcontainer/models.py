@@ -9,12 +9,13 @@ from typing import Any, Dict, List
 
 import yaml
 
+
 @dataclass(frozen=True)
 class NspawnProfile:
     """nspawn execution profile definition (systemd-nspawn is implicit)."""
     name: str
     nspawn: List[str]           # full resolved list: ["systemd-nspawn", "-D", "{{ROOT}}", ...]
-    cmd: List[str] | None = None
+    cmd: List[str] | str | None = None  # list = direct argv (old style), str = free-form shell script (new | block scalar support)
 
     @classmethod
     def from_dict(
@@ -53,15 +54,17 @@ class NspawnProfile:
             if item:
                 effective.append(str(item))
 
-        # normalize cmd
-        cmd: List[str] | None = None
-        if cmd_raw:
+        # normalize cmd - free-form like RUN (string or | block scalar = shell script; list = argv for backward compat)
+        cmd: List[str] | str | None = None
+        if cmd_raw is not None:
             if isinstance(cmd_raw, str):
-                cmd = [cmd_raw]
+                cmd_str = cmd_raw.strip()
+                cmd = cmd_str if cmd_str else None
             elif isinstance(cmd_raw, list):
-                cmd = [str(x) for x in cmd_raw if str(x).strip()]
+                cmd_list = [str(x) for x in cmd_raw if str(x).strip()]
+                cmd = cmd_list if cmd_list else None
             else:
-                raise ValueError(f"Profile '{name}' cmd: must be a string or list of strings")
+                raise ValueError(f"Profile '{name}' cmd: must be a string (shell script / | block) or list of strings (argv)")
 
         return cls(name=name, nspawn=effective, cmd=cmd)
 
@@ -137,7 +140,7 @@ class Manifest:
     final_name: str
     profile: str
     nspawn_template: List[str]
-    default_cmd: List[str] | None
+    default_cmd: List[str] | str | None
     stage: str
     steps: int
     built_at: str

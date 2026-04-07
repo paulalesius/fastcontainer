@@ -26,10 +26,10 @@ Examples:
 
     sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default
 
-    # Build and automatically drop into bash (uses profile's cmd:)
+    # Build and automatically run the profile's cmd: (free-form script)
     sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
 
-    # Override profile cmd: with your own command
+    # Override profile cmd: with your own command (CLI always uses argv)
     sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
 
     # One-off command on an already-built image
@@ -84,6 +84,25 @@ All profiles have the same keys (`extend`, `add`, `remove`, `cmd`) and can exten
 
 - Root profiles (no `extend`) define the full list of nspawn **flags** under `add:` (must include `-D` and `{{ROOT}}`).
 - Other profiles inherit from a parent and can `add` / `remove` flags.
+- `cmd:` is the optional post-build command/script (runs automatically after layers are built or when re-running an existing image).  
+  It now supports **free-form shell scripts exactly like `RUN:`**:
+
+  - **List form** (backward-compatible, direct argv – no shell):
+    ```yaml
+    cmd:
+      - /llama.cpp/build/bin/llama-bench
+      - -hf
+      - unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
+    ```
+
+  - **Free-form form** (recommended – `cmd: |` block scalar):
+    ```yaml
+    cmd: |
+      # Multi-line scripts, pipes, loops, environment setup – everything works
+      echo "=== Starting benchmark ==="
+      /llama.cpp/build/bin/llama-bench -hf unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
+      echo "=== Benchmark finished ==="
+    ```
 
 ```yaml
 profiles:
@@ -97,13 +116,13 @@ profiles:
     cmd: null
 ```
 
-**Build with automatic post-build command** (uses profile `cmd:`):
+**Build with automatic post-build command** (uses profile `cmd:` – now free-form!):
 
-    sudo fastcontainer build /disk/containers ./prepare.yaml -p run-llama
+    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
 
-**Override with your own command** (CLI wins):
+**Override with your own command** (CLI always wins and uses argv style):
 
-    sudo fastcontainer build /disk/containers ./prepare.yaml -p run-llama -- /bin/bash -l
+    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
 
 The final image name remains profile-aware: `<effective_base>-<profile>-<40hex_yaml>`.
 

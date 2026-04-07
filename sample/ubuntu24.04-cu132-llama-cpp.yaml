@@ -5,21 +5,6 @@ base:
     debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
     chroot . echo "test command inside chroot"
 
-# @TODO IMPLEMENT
-# Profiles need the nspawn command, and then a final command that is actually run inside
-# of the container after all the layers have been built. It's essentially an additional
-# final step but it never builds a layer out of it, it just runs the command
-# Example:
-# profiles:
-#   default:
-#     nspawn: # what's this for?
-#       - flags
-#     cmd:
-#       - final command?
-# @TODO Figure, through usage, if this is a good idea, or should all of the flags be shared?
-#       An idea that I've had is to have a base flags, then different profiles can add or
-#       remove flags from the base command, but it's unclear why other than for sharing flags
-#
 profiles:
   default:
     add:
@@ -61,10 +46,11 @@ profiles:
      - --bind=/home/noname/.cache/huggingface:/root/.cache/huggingface
      - --setenv=LD_LIBRARY_PATH=/usr/lib64/
     del: []
-    cmd:
-      - /llama.cpp/build/bin/llama-bench
-      - -hf
-      - unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
+    cmd: |
+      # Multi-line free-form script (exactly like RUN:)
+      echo "=== Starting llama-bench ==="
+      /llama.cpp/build/bin/llama-bench -hf unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
+      echo "=== Benchmark finished ==="
 
 steps:
   # Ubuntu is minimal so we need to set it up

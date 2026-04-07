@@ -3,3 +3,5 @@
 uv\.lock
 .fastcontainer.lock
 __pycache__/
+.venv/
+build/
