@@ -2,6 +2,8 @@
 name = "fastcontainer"
 version = "0.1.0"
 description = "Minimal btrfs + systemd-nspawn layered container builder"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml >= 6.0",

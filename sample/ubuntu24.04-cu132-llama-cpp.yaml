@@ -54,6 +54,7 @@ profiles:
       - --bind-ro=/usr/bin/nvidia-smi
   test:
     extend: default
+
   run-llama:
     extend: default
     add:
