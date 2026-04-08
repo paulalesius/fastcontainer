@@ -76,6 +76,12 @@ This design gives you:
 
 The layer hash chain and final image name are **profile-aware**. Different profiles produce completely different hashes and final subvolume names.
 
+**Note on evolving specification**
+---------------------------------
+The YAML specification, profile handling, and overall container lifecycle are still actively evolving.  
+**Container layer deletion** (beyond the current `--prune` flag that only removes intermediate `__*` layers) has **not been implemented yet**.  
+You are responsible for manually deleting old final images or bases when you no longer need them. Future releases will add safe, policy-driven cleanup commands.
+
 **Profiles**
 --------
 
