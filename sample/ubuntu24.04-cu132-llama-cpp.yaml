@@ -19,6 +19,8 @@ profiles:
       - RUN: |
           apt-get update
           apt install -y software-properties-common wget git ncurses-term libssl-dev cmake
+          add-apt-repository universe -y
+          apt update && apt -y upgrade
 
   # GPU-enabled variant (inherits common steps + adds CUDA)
   cuda:
@@ -31,8 +33,32 @@ profiles:
           apt-get -y install cuda-toolkit
 
   # Full build variant (inherits common + cuda + adds llama.cpp)
-  default:
+  llama-cpp:
     extend: cuda
+    add:
+      - --property=DeviceAllow=char-nvidia rw
+      - --property=DeviceAllow=char-nvidia-uvm rw
+      - --property=DeviceAllow=char-nvidia-caps rw
+      - --property=DeviceAllow=char-drm rw
+      - --property=DeviceAllow=char-nvidia-caps-imex-channels rw
+      - --property=DeviceAllow=char-nvidiactl rw
+      # Focus on one GPU, but one can specify: --setenv=NVIDIA_VISIBLE_DEVICES=0,1
+      - --setenv=NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # There may be additional cards, nvidia1 etc
+      - --bind=/dev/nvidia0
+      - --bind=/dev/nvidiactl
+      - --bind=/dev/nvidia-uvm
+      - --bind=/dev/dri
+      - --bind=/dev/nvidia-caps
+      - --bind=/sys/module
+      # Bind NVIDIA Driver infrastructure from the host as we don't install the driver inside of the$
+      # This is required when building things because they link to the driver
+      - --bind-ro=/usr/lib64/libcuda.so.595.58.03
+      - --bind-ro=/usr/lib64/libcuda.so.1
+      - --bind-ro=/usr/lib64/libnvidia-ml.so.595.58.03
+      - --bind-ro=/usr/lib64/libnvidia-ml.so.1
+      - --bind-ro=//usr/lib64/libnvidia-allocator.so.595.58.03
+      - --bind-ro=/usr/bin/nvidia-smi
     steps:
       - RUN: |
           git clone https://github.com/ggml-org/llama.cpp.git
@@ -46,8 +72,8 @@ profiles:
             cmake --build build --config Release -j $(nproc)
 
   # Runtime variant — adds extra binds + post-build command
-  run-llama:
-    extend: default
+  run-llama-cpp:
+    extend: llama-cpp
     add:
       - --bind=/home/noname/.cache/huggingface:/root/.cache/huggingface
       - --setenv=LD_LIBRARY_PATH=/usr/lib64/

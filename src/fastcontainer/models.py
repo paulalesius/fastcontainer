@@ -39,25 +39,26 @@ class NspawnProfile:
         if not isinstance(steps_raw, list):
             raise ValueError(f"Profile '{name}' 'steps:' must be a list of step dicts (RUN: ...)")
 
-        # === nspawn flags (unchanged) ===
+        # === nspawn flags (fixed: robust root handling, no more duplicate binary) ===
         if extend_name:
             if extend_name not in resolved_profiles:
                 raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
             effective = resolved_profiles[extend_name].nspawn[:]
         else:
-            if not add_raw:
-                raise ValueError(f"Root profile '{name}' must have a non-empty 'add:' list of flags")
-            effective = ["systemd-nspawn"] + [str(item) for item in add_raw]
+            # Root profile: always start with the binary exactly once
+            effective = ["systemd-nspawn"]
 
+        # Add this profile's flags (deduplicates automatically if someone puts the binary in YAML)
+        for item in add_raw:
+            flag = str(item).strip()
+            if flag and flag not in effective:   # ← prevents any accidental duplicate
+                effective.append(flag)
+
+        # Remove flags specified in remove/del
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
 
-        if extend_name:
-            for item in add_raw:
-                if item:
-                    effective.append(str(item))
-
-        # === NEW: steps inheritance (tree of variants) ===
+        # === steps inheritance (unchanged, tree of variants) ===
         parsed_local_steps: List[Step] = []
         for i, s in enumerate(steps_raw, 1):
             parsed_local_steps.append(Step.from_dict(s, i))
@@ -66,7 +67,7 @@ class NspawnProfile:
             parent = resolved_profiles[extend_name]
             effective_steps: List[Step] = list(parent.steps)
             for i, s in enumerate(parsed_local_steps, len(parent.steps) + 1):
-                effective_steps.append(replace(s, index=i))  # correct cumulative index
+                effective_steps.append(replace(s, index=i))
         else:
             effective_steps = parsed_local_steps
 
