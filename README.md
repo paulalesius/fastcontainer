@@ -5,141 +5,146 @@ fastcontainer - Minimal btrfs + systemd-nspawn layered container builder
   <img src="logo.jpg" alt="fastcontainer">
 </div>
 
-A lightweight, fast, and minimal container builder using btrfs subvolumes and systemd-nspawn.
+### Design Philosophy — Built for R&D, not production hardening
 
-Usage
------
+**fastcontainer is an R&D tool first and foremost.**
 
-Build a container (with optional post-build command):
+It is deliberately optimized for **maximum flexibility, speed of iteration, and ease of experimentation** — especially for GPU-heavy machine learning, CUDA development, custom driver passthrough, and rapid prototyping of complex software stacks.
 
-    sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-q] [--prune] [-- <command...>]
+This means it makes the following intentional trade-offs:
 
-Run a command inside a built container:
+- Runs as root and uses full systemd-nspawn with generous host bindings (devices, /dev, /sys, user directories, etc.).
+- Prioritizes direct hardware access (NVIDIA GPUs, CUDA toolkit, etc.) over container isolation.
+- Does **not** implement rootless mode, seccomp, AppArmor, or other production-grade sandboxing by default.
+- Focuses on developer velocity: one YAML file, instant btrfs snapshot caching, profile inheritance for build variants, and free-form shell scripts in `RUN:` / `cmd:`.
 
-    sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-q]
+**In short:**
+If you want to quickly spin up a reproducible environment with full GPU access, install whatever you want, bind your entire home directory for cache, and iterate in seconds — fastcontainer is perfect.
 
-Interactive shell example:
+If you need a hardened, production-ready, multi-tenant container platform, this is **not** the tool for you (use Podman, Docker, or Kubernetes instead).
 
-    sudo fastcontainer exec <containers_dir> <image-name> -- bash -l
+The goal is to feel closer to a super-powered `chroot + debootstrap + script` workflow than to a security-first container runtime.
 
-Examples:
+### Usage
+```bash
+sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-q] [--prune] [-- <command...>]
 
-    sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default
-
-    # Build and automatically run the profile's cmd: (free-form script)
-    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
-
-    # Override profile cmd: with your own command (CLI always uses argv)
-    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
-
-    # One-off command on an already-built image
-    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p default -- ls -la /
-
-    # Run a one-off command
-    sudo fastcontainer exec /disk/containers ubuntu-custom-default-1a2b3c... -- apt-get install -y htop
-
-The image name is the final subvolume name printed at the end of a successful build
-(e.g. `ubuntu-custom-default-abc123def456...`).
-
-Base specification
-------------------
-The `base:` key in the YAML supports two formats:
-
-1. Simple string — when the base btrfs subvolume already exists in the containers directory:
-
-        base: ubuntu-noble
-
-2. Dictionary with creation script — fastcontainer will automatically create the base the first time:
-
-        base:
-          name: ubuntu-custom
-          create: |
-            debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
-            chroot . echo "test command inside chroot"
-
-When using the dictionary form with `create:`, the base subvolume on disk is named `<name>-<16hex>` (a short hash of the script). Changing the creation script automatically produces a new base.
-
-Temporary subvolumes & pruning policy
--------------------------------------
-fastcontainer uses strict naming conventions so it can never accidentally delete your final images or bases:
-
-- Final images:          `<effective_base>-<profile>-<40hex_yaml>`
-- Base subvolumes:       `<name>` or `<name>-<16hex>` (when using `create:`)
-- Intermediate layers:   `__<effective_base>-<40hex>`   ← automatically pruned on success
-- Temporary volumes:     `_...-<32hex_uuid>` (start with single underscore) ← always cleaned up
-
-This design gives you:
-- Fast per-step caching **during a single build run** (great when iterating on a failing step)
-- A clean containers directory after every successful build (no disk bloat)
-- Zero risk of deleting the wrong subvolumes
-- Old bases are intentionally kept when the `create:` script changes (different hash suffix)
-
-The layer hash chain and final image name are **profile-aware**. Different profiles produce completely different hashes and final subvolume names.
-
-**Note on evolving specification**
----------------------------------
-The YAML specification, profile handling, and overall container lifecycle are still actively evolving.  
-**Container layer deletion** (beyond the current `--prune` flag that only removes intermediate `__*` layers) has **not been implemented yet**.  
-You are responsible for manually deleting old final images or bases when you no longer need them. Future releases will add safe, policy-driven cleanup commands.
-
-**Profiles**
---------
-
-Every build requires a `profiles:` section.  
-All profiles have the same keys (`extend`, `add`, `remove`, `cmd`) and can extend each other.
-
-- Root profiles (no `extend`) define the full list of nspawn **flags** under `add:` (must include `-D` and `{{ROOT}}`).
-- Other profiles inherit from a parent and can `add` / `remove` flags.
-- `cmd:` is the optional post-build command/script (runs automatically after layers are built or when re-running an existing image).  
-  It now supports **free-form shell scripts exactly like `RUN:`**:
-
-  - **List form** (backward-compatible, direct argv – no shell):
-    ```yaml
-    cmd:
-      - /llama.cpp/build/bin/llama-bench
-      - -hf
-      - unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
-    ```
-
-  - **Free-form form** (recommended – `cmd: |` block scalar):
-    ```yaml
-    cmd: |
-      # Multi-line scripts, pipes, loops, environment setup – everything works
-      echo "=== Starting benchmark ==="
-      /llama.cpp/build/bin/llama-bench -hf unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
-      echo "=== Benchmark finished ==="
-    ```
-
-```yaml
-profiles:
-  default:
-    add: [...]          # full list of flags for root profile
-
-  test:
-    extend: default
-    add: []
-    remove: []
-    cmd: null
+sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-q]
 ```
 
-**Build with automatic post-build command** (uses profile `cmd:` – now free-form!):
+### Examples
+```bash
+# Build default variant
+sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default
 
-    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
+# Build a specialized variant (inherits common steps + adds its own)
+sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
 
-**Override with your own command** (CLI always wins and uses argv style):
+# Run post-build command from profile (or override it)
+sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
+```
 
-    sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
+The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_yaml>`.
 
-The final image name remains profile-aware: `<effective_base>-<profile>-<40hex_yaml>`.
+### Base specification
+The `base:` key supports two formats (unchanged):
 
-If you want to reclaim disk space after a build, use `--prune`:
+1. Simple string:
+   ```yaml
+   base: ubuntu-noble
+   ```
 
-    sudo fastcontainer build ... --prune
+2. Dictionary with creation script (cached by hash):
+   ```yaml
+   base:
+     name: ubuntu-custom
+     create: |
+       debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+   ```
+
+### Temporary subvolumes & pruning policy
+(unchanged – same safety guarantees, intermediate layers `__*`, final images, etc.)
+
+### Profiles – now a tree of build variants
+**This is the biggest change in v0.2.0.**
+
+- Profiles define **both** nspawn flags (`add`/`remove`) **and** build steps (`steps`).
+- `extend:` now inherits **flags + steps**, letting you build a natural tree of variants from a common base.
+- All variants share the same base image but can have different intermediate layers.
+- Layer caching works perfectly across branches (shared prefix steps reuse the exact same btrfs subvolumes).
+- `cmd:` (post-build command) is still supported and can be a free-form shell script or argv list.
+
+#### YAML structure
+```yaml
+base: ...
+
+profiles:
+  common:                          # root profile (defines base steps + flags)
+    add:
+      - "systemd-nspawn"
+      - "-D"
+      - "{{ROOT}}"
+      - "--tmpfs=/var/tmp"
+      # ... other common flags
+    steps:
+      - RUN: |
+          apt-get update
+          apt-get install -y curl git
+
+  cuda:                            # first branch – inherits common steps
+    extend: common
+    add: [...]                     # extra GPU flags
+    steps:
+      - RUN: |
+          # CUDA-specific steps...
+
+  llama-cpp:                       # deeper branch – inherits common + cuda
+    extend: cuda
+    steps:
+      - RUN: |
+          git clone https://github.com/ggml-org/llama.cpp.git
+          # build steps...
+
+  minimal:                         # alternative short variant
+    extend: common
+    steps: []                      # no extra steps
+```
+
+#### Key rules
+- Root profiles (no `extend`) must provide a full `add:` list of flags.
+- Child profiles inherit **all** steps from their parent and append their own.
+- Step order is always preserved (parent steps first).
+- The selected profile (`-p`) determines the exact step list used for the build.
+- Top-level `steps:` (old flat list) has been removed. Migrate by moving your steps under the root profile you usually use.
+
+### Migration from older YAMLs
+Move the old top-level `steps:` into your main/root profile:
+```yaml
+# Before (old)
+steps:
+  - RUN: ...
+
+# After (new)
+profiles:
+  default:
+    add: [...]
+    steps:
+      - RUN: ...
+```
+
+### Post-build command (`cmd:`)
+Supports both list (argv) and free-form shell script (`|` block) – exactly like `RUN:`.
+
+### Build with pruning
+```bash
+sudo fastcontainer build ... -p llama-cpp --prune
+```
+
+---
+
+**Note on evolving specification**  
+The YAML format is stable for the new profile tree. Container deletion policy and advanced cleanup commands are still planned for future releases.
 
 Contributing & Development
 --------------------------
-Developers wanting to take part in the project can create feature requests or issues through GitHub.
-
-To ask the project questions in an LLM prompt, simply run:
-./scripts/project-to-prompt.sh
-This script collects all source files into a clean, ready-to-paste format.
+Run `./scripts/project-to-prompt.sh` to generate a ready-to-paste prompt with all source files.

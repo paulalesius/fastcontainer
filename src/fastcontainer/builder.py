@@ -98,7 +98,7 @@ class Builder:
             self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
             return Layer(path=layer_path, hash=step_hash)
 
-        self.logger.info(f"\n[Step {step.index}/{len(self.spec.steps)}] RUN -> new layer {layer_path.name}")
+        self.logger.info(f"\n[Step {step.index}/{len(self.profile.steps)}] RUN -> new layer {layer_path.name}")
         self.logger.info(f"    Command:\n{step.cmd}")
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
@@ -154,7 +154,7 @@ class Builder:
         step_logs: dict[str, dict[str, Any]] = {}
 
         try:
-            for step in self.spec.steps:
+            for step in self.profile.steps:
                 try:
                     current = self._build_layer(current, step, step_logs)
                 except Exception as e:

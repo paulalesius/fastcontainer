@@ -1,84 +1,62 @@
-# Based on Ubuntu Noble 24.04
+# Ubuntu 24.04 + CUDA + llama.cpp — demonstrates full profile step tree / build variants
 base:
   name: ubuntu24.04-cu132-llama-cpp
   create: |
     debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
-    chroot . echo "test command inside chroot"
 
 profiles:
-  default:
+  # Root profile — common setup steps shared by all variants
+  common:
     add:
-      - --property=DeviceAllow=char-nvidia rw
-      - --property=DeviceAllow=char-nvidia-uvm rw
-      - --property=DeviceAllow=char-nvidia-caps rw
-      - --property=DeviceAllow=char-drm rw
-      - --property=DeviceAllow=char-nvidia-caps-imex-channels rw
-      - --property=DeviceAllow=char-nvidiactl rw
-      - -D
+      - "systemd-nspawn"
+      - "-D"
       - "{{ROOT}}"
-      - --tmpfs=/var/tmp
-      - --private-users=no
-      - --resolv-conf=replace-stub
-      - --timezone=off
-      # Focus on one GPU, but one can specify: --setenv=NVIDIA_VISIBLE_DEVICES=0,1
-      - --setenv=NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # There may be additional cards, nvidia1 etc
-      - --bind=/dev/nvidia0
-      - --bind=/dev/nvidiactl
-      - --bind=/dev/nvidia-uvm
-      - --bind=/dev/dri
-      - --bind=/dev/nvidia-caps
-      - --bind=/sys/module
-      # Bind NVIDIA Driver infrastructure from the host as we don't install the driver inside of the container
-      # This is required when building things because they link to the driver
-      - --bind-ro=/usr/lib64/libcuda.so.595.58.03
-      - --bind-ro=/usr/lib64/libcuda.so.1
-      - --bind-ro=/usr/lib64/libnvidia-ml.so.595.58.03
-      - --bind-ro=/usr/lib64/libnvidia-ml.so.1
-      - --bind-ro=//usr/lib64/libnvidia-allocator.so.595.58.03
-      - --bind-ro=/usr/bin/nvidia-smi
-  test:
-    extend: default
+      - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"
+    steps:
+      - RUN: |
+          apt-get update
+          apt install -y software-properties-common wget git ncurses-term libssl-dev cmake
 
+  # GPU-enabled variant (inherits common steps + adds CUDA)
+  cuda:
+    extend: common
+    steps:
+      - RUN: |
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          apt-get update
+          apt-get -y install cuda-toolkit
+
+  # Full build variant (inherits common + cuda + adds llama.cpp)
+  default:
+    extend: cuda
+    steps:
+      - RUN: |
+          git clone https://github.com/ggml-org/llama.cpp.git
+      - RUN: |
+          . /etc/profile
+          export CUDA_HOME=/usr/local/cuda
+          export PATH=$CUDA_HOME/bin:${PATH}
+          export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
+          cd llama.cpp
+          cmake -B build -DGGML_CUDA=ON && \
+            cmake --build build --config Release -j $(nproc)
+
+  # Runtime variant — adds extra binds + post-build command
   run-llama:
     extend: default
     add:
-     - --bind=/home/noname/.cache/huggingface:/root/.cache/huggingface
-     - --setenv=LD_LIBRARY_PATH=/usr/lib64/
-    del: []
+      - --bind=/home/noname/.cache/huggingface:/root/.cache/huggingface
+      - --setenv=LD_LIBRARY_PATH=/usr/lib64/
     cmd: |
-      # Multi-line free-form script (exactly like RUN:)
       echo "=== Starting llama-bench ==="
       /llama.cpp/build/bin/llama-bench -hf unsloth/Qwen3.5-9B-GGUF:UD-IQ2_XXS
       echo "=== Benchmark finished ==="
 
-steps:
-  # Ubuntu is minimal so we need to set it up
-  - RUN: |
-      apt-get update
-      apt install -y software-properties-common wget git ncurses-term libssl-dev cmake
-      add-apt-repository universe -y
-      apt update && apt -y upgrade
-
-  # Set up and install CUDA
-  - RUN: |
-      wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-      echo "$(id) $(pwd)"
-      dpkg -i cuda-keyring_1.1-1_all.deb
-      apt-get update
-      apt-get -y install cuda-toolkit
-
-  # Check out llama-cpp
-  - RUN: |
-      git clone https://github.com/ggml-org/llama.cpp.git
-
-  # Compile llama-cpp, simple build for demonstration
-  - RUN: |
-      . /etc/profile
-      export CUDA_HOME=/usr/local/cuda
-      export PATH=$CUDA_HOME/bin:${PATH}
-      export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
-      cd llama.cpp
-      /usr/bin/nvidia-smi
-      cmake -B build -DGGML_CUDA=ON && \
-        cmake --build build --config Release -j $(nproc)
+  # Short alternative branch (only common steps)
+  minimal:
+    extend: common
+    steps: []

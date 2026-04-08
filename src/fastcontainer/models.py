@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import hashlib
 import json
@@ -12,10 +12,11 @@ import yaml
 
 @dataclass(frozen=True)
 class NspawnProfile:
-    """nspawn execution profile definition (systemd-nspawn is implicit)."""
+    """nspawn execution profile definition (now also carries build steps)."""
     name: str
-    nspawn: List[str]           # full resolved list: ["systemd-nspawn", "-D", "{{ROOT}}", ...]
-    cmd: List[str] | str | None = None  # list = direct argv (old style), str = free-form shell script (new | block scalar support)
+    nspawn: List[str]           # full resolved list
+    cmd: List[str] | str | None = None
+    steps: List[Step] = field(default_factory=list)  # NEW: inherited + own steps
 
     @classmethod
     def from_dict(
@@ -24,37 +25,52 @@ class NspawnProfile:
         data: dict,
         resolved_profiles: Dict[str, "NspawnProfile"],
     ) -> "NspawnProfile":
-        """Resolve a profile with explicit extend + add/remove."""
+        """Resolve a profile with extend + add/remove for flags AND steps (tree of variants)."""
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
-        remove_raw = data.get("remove", data.get("del", []))  # support old "del:" for migration
+        remove_raw = data.get("remove", data.get("del", []))
         cmd_raw = data.get("cmd")
+        steps_raw = data.get("steps", [])
 
         if not isinstance(add_raw, list):
             raise ValueError(f"Profile '{name}' 'add:' must be a list")
         if not isinstance(remove_raw, list):
             raise ValueError(f"Profile '{name}' 'remove:' must be a list")
+        if not isinstance(steps_raw, list):
+            raise ValueError(f"Profile '{name}' 'steps:' must be a list of step dicts (RUN: ...)")
 
+        # === nspawn flags (unchanged) ===
         if extend_name:
             if extend_name not in resolved_profiles:
                 raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
             effective = resolved_profiles[extend_name].nspawn[:]
         else:
-            # root profile: add: becomes the full flag list
             if not add_raw:
                 raise ValueError(f"Root profile '{name}' must have a non-empty 'add:' list of flags")
             effective = ["systemd-nspawn"] + [str(item) for item in add_raw]
 
-        # exact string match removal
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
 
-        # append additions
-        for item in add_raw if extend_name else []:  # only append on derived profiles
-            if item:
-                effective.append(str(item))
+        if extend_name:
+            for item in add_raw:
+                if item:
+                    effective.append(str(item))
 
-        # normalize cmd - free-form like RUN (string or | block scalar = shell script; list = argv for backward compat)
+        # === NEW: steps inheritance (tree of variants) ===
+        parsed_local_steps: List[Step] = []
+        for i, s in enumerate(steps_raw, 1):
+            parsed_local_steps.append(Step.from_dict(s, i))
+
+        if extend_name:
+            parent = resolved_profiles[extend_name]
+            effective_steps: List[Step] = list(parent.steps)
+            for i, s in enumerate(parsed_local_steps, len(parent.steps) + 1):
+                effective_steps.append(replace(s, index=i))  # correct cumulative index
+        else:
+            effective_steps = parsed_local_steps
+
+        # === cmd (unchanged) ===
         cmd: List[str] | str | None = None
         if cmd_raw is not None:
             if isinstance(cmd_raw, str):
@@ -64,10 +80,14 @@ class NspawnProfile:
                 cmd_list = [str(x) for x in cmd_raw if str(x).strip()]
                 cmd = cmd_list if cmd_list else None
             else:
-                raise ValueError(f"Profile '{name}' cmd: must be a string (shell script / | block) or list of strings (argv)")
+                raise ValueError(f"Profile '{name}' cmd: must be a string or list")
 
-        return cls(name=name, nspawn=effective, cmd=cmd)
-
+        return cls(
+            name=name,
+            nspawn=effective,
+            cmd=cmd,
+            steps=effective_steps,
+        )
 
 @dataclass(frozen=True)
 class BaseSpec:
@@ -119,7 +139,6 @@ class Step:
         raw_cmd = data["RUN"]
         cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
         return cls(index=index, raw=data, cmd=cmd_str.strip() if cmd_str else None)
-
 
 @dataclass(frozen=True)
 class Layer:
@@ -209,10 +228,10 @@ class Manifest:
 @dataclass(frozen=True)
 class BuildSpec:
     base: BaseSpec
-    steps: List[Step]
     yaml_path: Path
     yaml_hash: str
     profiles: Dict[str, NspawnProfile]
+    # steps: removed – now per-profile (tree of variants)
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
@@ -227,16 +246,12 @@ class BuildSpec:
             raise ValueError("YAML must contain 'base:'")
 
         base = BaseSpec.from_data(base_raw)
-        steps_raw = spec.get("steps", [])
-
-        if not isinstance(steps_raw, list):
-            raise ValueError("'steps:' must be a list")
 
         profiles_raw = spec.get("profiles")
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
             raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
 
-        # Resolve profiles (root first → derived)
+        # Resolve profiles (flags + steps inheritance)
         resolved: Dict[str, NspawnProfile] = {}
         for name, data in profiles_raw.items():
             if not isinstance(data, dict):
@@ -249,11 +264,9 @@ class BuildSpec:
                 raise ValueError(f"Profile '{p.name}' is missing the required '{{ROOT}}' placeholder in flags")
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
-        steps = [Step.from_dict(s, i + 1) for i, s in enumerate(steps_raw)]
 
         return cls(
             base=base,
-            steps=steps,
             yaml_path=yaml_path,
             yaml_hash=yaml_hash,
             profiles=resolved,
