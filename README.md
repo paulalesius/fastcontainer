@@ -27,10 +27,15 @@ The goal is to feel closer to a super-powered `chroot + debootstrap + script` wo
 
 ### Usage
 ```bash
-sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-q] [--prune] [-- <command...>]
+sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-- <command...>]
 
-sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-q]
+sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-v]
 ```
+
+**Logging / Output**
+- **Default** (no `-v`): clean, plain ASCII progress only — shows current profile + each step as it is built.
+- `-v` / `--verbose`: full live output of every build step + internal commands.
+- **On failure**: the complete output of the failing step is **always** printed (even without `-v`) before exiting.
 
 ### Examples
 ```bash
@@ -42,6 +47,9 @@ sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.y
 
 # Run post-build command from profile (or override it)
 sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
+
+# Verbose build (shows full step output)
+sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default -v
 ```
 
 The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_fingerprint>`.
@@ -138,6 +146,7 @@ profiles:
   minimal:                         # alternative branch
     extend: common
     steps: []                      # no extra steps
+```
 
 #### Key rules
 - Root profiles (no `extend`) must provide a full `add:` list of flags.

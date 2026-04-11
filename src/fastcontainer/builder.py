@@ -1,6 +1,5 @@
 import hashlib
 import uuid
-import sys
 import json
 from pathlib import Path
 from typing import Any, List
@@ -18,13 +17,13 @@ class Builder:
     """High-level orchestration of the layered btrfs build process."""
 
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
-                 prune: bool = False, quiet: bool = False, logger: logging.Logger | None = None,
+                 prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
                  post_build_cmd: List[str] | str | None = None):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
         self.prune = prune
-        self.quiet = quiet
+        self.verbose = verbose
         self.logger = logger or logging.getLogger("fastcontainer")
         self.post_build_cmd = post_build_cmd
 
@@ -34,65 +33,55 @@ class Builder:
         self.final_path = self.containers_dir / self.final_name
 
     def _run_post_build(self, cmd: List[str] | str | None) -> None:
-        """Unified helper for post-build command (CLI override or profile.cmd)."""
+        """Run post-build command (always shows output)."""
         if not cmd:
             return
-        if isinstance(cmd, str):
-            self.logger.info(f"→ Running post-build script:\n{cmd.strip()}")
-        else:
-            self.logger.info(f"→ Running post-build command: {' '.join(map(str, cmd))}")
+        self.logger.info("Running post-build command")
         exec_in_container(
             root=self.final_path,
             command=cmd,
             nspawn_template=self.profile.nspawn,
-            quiet=self.quiet
         )
-        self.logger.info("✅ Post-build command finished")
+        self.logger.info("Post-build command finished")
 
     def _ensure_base_exists(self) -> None:
-        """Create base subvolume from command if it doesn't exist (cached by hash)."""
+        """Create base subvolume from command if it doesn't exist."""
         base_path = self.containers_dir / self.spec.base.effective_name
 
         if base_path.is_dir():
-            self.logger.info(f"[OK] Using existing base: {self.spec.base.effective_name}")
+            self.logger.info(f"Using existing base: {self.spec.base.effective_name}")
             return
 
         if not self.spec.base.create_cmd:
             raise FileNotFoundError(f"Base subvolume not found: {base_path}")
 
-        self.logger.info(f"[BUILD] Creating base '{self.spec.base.effective_name}' from command...")
+        self.logger.info(f"Creating base '{self.spec.base.effective_name}'...")
 
         temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
         try:
-            self.logger.info(f"  Creating empty subvolume → {temp_name}")
-            create(temp_path, quiet=self.quiet)
-
-            self.logger.info("  Executing base creation script (host, cwd = subvolume)...")
+            create(temp_path)
             cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
-            run_and_capture(cmd, quiet=self.quiet, cwd=temp_path)
-
-            self.logger.info(f"[OK] Base {self.spec.base.effective_name} created successfully")
-
-            snapshot(temp_path, base_path, quiet=self.quiet)
-
+            run_and_capture(cmd, verbose=self.verbose, cwd=temp_path)
+            snapshot(temp_path, base_path)
+            self.logger.info(f"Base {self.spec.base.effective_name} created successfully")
         except Exception:
-            self.logger.error("❌ Base creation failed — cleaning up temporary subvolume")
+            self.logger.error("Base creation failed")
             raise
         finally:
             if temp_path.is_dir():
-                delete(temp_path, quiet=True)
+                delete(temp_path)
 
     def _layer_path(self, step_hash: str) -> Path:
         return self.containers_dir / f"__{self.spec.base.effective_name}-{step_hash}"
 
     def _build_layer(self, previous: Layer, step: Step, current_logs: dict[str, dict[str, Any]], total_steps: int) -> Layer:
-        """Build one layer and update the logs dict (passed by reference)."""
+        """Build one layer (or use cache)."""
         if not step.cmd:
             return previous
 
-        nspawn_context = "\n".join(self.profile.nspawn)  # child's flags for its steps
+        nspawn_context = "\n".join(self.profile.nspawn)
         content = (
             previous.hash.encode()
             + step.cmd.encode("utf-8")
@@ -101,30 +90,27 @@ class Builder:
         step_hash = hashlib.sha1(content).hexdigest()
         layer_path = self._layer_path(step_hash)
 
+        preview = (step.cmd or "-").splitlines()[0]
+
         if layer_path.is_dir():
-            preview = (step.cmd or "—").splitlines()[0]
-            self.logger.info(f"[CACHE] Step {step.index}/{total_steps} → {preview}")
+            self.logger.info(f"Step {step.index}/{total_steps} (cached): {preview}")
             return Layer(path=layer_path, hash=step_hash)
 
-        preview = (step.cmd or "—").splitlines()[0]
-        self.logger.info(f"\n[BUILD] Step {step.index}/{total_steps} → {preview}")
+        self.logger.info(f"Step {step.index}/{total_steps}: {preview}")
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
-        self.logger.info(f"  Creating temp snapshot -> {temp_name}")
-        snapshot(previous.path, temp_path, quiet=self.quiet)
+        snapshot(previous.path, temp_path)
 
-        self.logger.info(f"  Executing step {step.index}...")
-        output = execute(temp_path, step.cmd, self.profile.nspawn, quiet=self.quiet)
+        output = execute(temp_path, step.cmd, self.profile.nspawn, verbose=self.verbose)
 
         current_logs[f"{step.index:03d}"] = {
             "command": step.cmd,
             "output": output.splitlines()
         }
-        self.logger.info(f"  [OK] Step {step.index} finished")
 
-        # Write per-layer manifest (self-describing + clearly marked intermediate)
+        # Write per-layer manifest
         manifest = Manifest.from_spec(
             self.spec,
             profile=self.profile,
@@ -135,61 +121,56 @@ class Builder:
         manifest_path = temp_path / "fastcontainer.json"
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest.to_dict(), f, indent=2)
-        self.logger.info(f"  ✓ Wrote per-layer manifest → fastcontainer.json")
 
-        snapshot(temp_path, layer_path, quiet=self.quiet)
-        delete(temp_path, quiet=self.quiet)
+        snapshot(temp_path, layer_path)
+        delete(temp_path)
 
-        self.logger.info(f"  [DONE] Layer created")
         return Layer(path=layer_path, hash=step_hash)
 
     def _ensure_parent_built(self) -> None:
-        """Recursively ensure the extended parent profile is fully built (no post-build cmd)."""
+        """Recursively ensure the extended parent profile is built."""
         if not self.profile.parent:
             return
         parent_profile = self.spec.profiles[self.profile.parent]
-        self.logger.info(f"→ Ensuring parent profile '{parent_profile.name}' is built...")
+        self.logger.info(f"Building parent profile: {parent_profile.name} first")
         parent_builder = Builder(
             containers_dir=self.containers_dir,
             spec=self.spec,
             profile=parent_profile,
             prune=self.prune,
-            quiet=self.quiet,
+            verbose=self.verbose,
             logger=self.logger,
-            post_build_cmd=None,  # never run cmd for intermediate parents
+            post_build_cmd=None,
         )
         parent_builder.build()
-        self.logger.info(f"→ Parent '{parent_profile.name}' ready.")
+        self.logger.info(f"Parent '{parent_profile.name}' ready")
 
     def build(self) -> None:
         if self.final_path.is_dir():
-            self.logger.info(f"✅ {self.final_name} already exists. Nothing to do.")
+            self.logger.info(f"Image already exists: {self.final_name}")
             cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
             self._run_post_build(cmd_to_run)
             return
 
-        self.logger.info(f"Building layered image {self.spec.base.effective_name} → {self.final_name} (profile: {self.profile.name})")
+        self.logger.info(f"Building profile: {self.profile.name}")
+        if self.profile.parent:
+            self.logger.info(f"  (extends {self.profile.parent})")
 
         self._ensure_base_exists()
 
-        # Start from parent final (if we extend) or base
         if self.profile.parent:
             self._ensure_parent_built()
             parent_profile = self.spec.profiles[self.profile.parent]
             parent_final_name = f"{self.spec.base.effective_name}-{parent_profile.name}-{parent_profile.fingerprint}"
             parent_final_path = self.containers_dir / parent_final_name
-            if not parent_final_path.is_dir():
-                raise RuntimeError(f"Parent profile '{self.profile.parent}' final image not found")
             current = Layer(path=parent_final_path, hash=parent_profile.fingerprint)
-            self.logger.info(f"Starting delta build for '{self.profile.name}' on top of parent '{self.profile.parent}'")
+            self.logger.info(f"Starting delta build for '{self.profile.name}'")
         else:
             current = Layer.initial(
                 base_path=self.containers_dir / self.spec.base.effective_name,
                 base_name=self.spec.base.effective_name,
             )
 
-        self.logger.info(f"Building profile '{self.profile.name}' (delta steps only)")
-        self.logger.info(f"Target image: {self.final_name}")
         self.logger.info(f"Delta steps: {len(self.profile.local_steps)}\n")
 
         step_logs: dict[str, dict[str, Any]] = {}
@@ -197,20 +178,17 @@ class Builder:
 
         try:
             for step in self.profile.local_steps:
-                try:
-                    current = self._build_layer(current, step, step_logs, total_steps)
-                except Exception as e:
-                    self.logger.error(f"❌ Build failed at step {step.index} in profile {self.profile.name}.")
-                    raise
-        except Exception:
+                current = self._build_layer(current, step, step_logs, total_steps)
+        except Exception as e:
+            self.logger.error(f"Build failed at step {step.index if 'step' in locals() else '?'} in profile '{self.profile.name}'")
             raise
         else:
-            self.logger.info(f"\nAll delta steps complete. Creating final image {self.final_name}")
+            self.logger.info("All steps completed successfully. Creating final image...")
 
             final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex}"
             final_temp_path = self.containers_dir / final_temp_name
 
-            snapshot(current.path, final_temp_path, quiet=self.quiet)
+            snapshot(current.path, final_temp_path)
 
             manifest = Manifest.from_spec(
                 self.spec,
@@ -222,30 +200,25 @@ class Builder:
             manifest_path = final_temp_path / "fastcontainer.json"
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest.to_dict(), f, indent=2)
-            self.logger.info(f"  Wrote final manifest → {manifest_path}")
 
-            snapshot(final_temp_path, self.final_path, quiet=self.quiet)
-            delete(final_temp_path, quiet=self.quiet)
+            snapshot(final_temp_path, self.final_path)
+            delete(final_temp_path)
 
             if self.prune:
                 self._prune_intermediates()
-                self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned)")
             else:
-                self.logger.info(f"   (Intermediate layers kept)")
+                self.logger.info("Intermediate layers kept")
 
-            self.logger.info(f"✅ Successfully built: {self.final_name}")
+            self.logger.info(f"Successfully built: {self.final_name}")
 
             cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
             self._run_post_build(cmd_to_run)
 
     def _prune_intermediates(self) -> None:
-        self.logger.info("\n🧹 Pruning all intermediate layers (keeping only the final image)...")
+        self.logger.info("Pruning intermediate layers...")
         prefix = f"__{self.spec.base.effective_name}-"
         for p in sorted(self.containers_dir.iterdir()):
-            if (p.is_dir()
-                and p.name.startswith(prefix)
-                and len(p.name) == len(prefix) + 40):
+            if (p.is_dir() and p.name.startswith(prefix) and len(p.name) == len(prefix) + 40):
                 if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
-                    self.logger.info(f"   Deleting {p.name}")
-                    delete(p, quiet=self.quiet)
-        self.logger.info("   ✓ All intermediates removed")
+                    delete(p)
+        self.logger.info("Intermediate layers pruned")

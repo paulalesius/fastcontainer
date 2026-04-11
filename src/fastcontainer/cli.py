@@ -31,16 +31,16 @@ def main() -> None:
 )
 @click.option('-p', '--profile', required=True,
               help="Profile name from the YAML 'profiles:' section (required).")
-@click.option('-q', '--quiet', is_flag=True, help="Quiet mode: hide tool commands (only show progress + your RUN output).")
-@click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build (default: keep them for reuse).")
+@click.option('-v', '--verbose', is_flag=True,
+              help="Verbose mode: show full output of each build step and internal commands (default: clean progress only).")
+@click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build.")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=False)
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, prune: bool, command: tuple[str, ...]) -> None:
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, command: tuple[str, ...]) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn.
 
-    Optional trailing command (after --) will be executed inside the final image:
-        fastcontainer build ... -p run-llama -- /bin/bash -l
+    Optional trailing command (after --) will be executed inside the final image.
     """
-    logger = setup_logger(quiet=quiet)
+    logger = setup_logger(verbose=verbose)
 
     if os.geteuid() != 0:
         logger.error("ERROR: This program must be run as root (use sudo)")
@@ -63,14 +63,13 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, p
 
         if profile not in spec.profiles:
             if profile == "base":
-                logger.error("ERROR: 'base' is a reserved special profile (common flags) and cannot be selected with -p base")
+                logger.error("ERROR: 'base' is a reserved special profile and cannot be selected")
             else:
-                logger.error(f"ERROR: Profile '{profile}' not found in YAML. Available profiles: {list(spec.profiles.keys())}")
+                logger.error(f"ERROR: Profile '{profile}' not found. Available: {list(spec.profiles.keys())}")
             sys.exit(1)
 
         selected_profile = spec.profiles[profile]
 
-        # CLI command overrides profile.cmd
         post_cmd = list(command) if command else None
 
         builder = Builder(
@@ -78,13 +77,13 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, p
             spec=spec,
             profile=selected_profile,
             prune=prune,
-            quiet=quiet,
+            verbose=verbose,
             logger=logger,
             post_build_cmd=post_cmd,
         )
         builder.build()
     except Exception as e:
-        logger.error(f"❌ Build failed: {e}")
+        logger.error(f"ERROR: Build failed: {e}")
         sys.exit(1)
     finally:
         if lock_fd is not None:
@@ -99,11 +98,11 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, quiet: bool, p
 @main.command()
 @click.argument("containers_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path, resolve_path=True))
 @click.argument("image", type=str)
-@click.option('-q', '--quiet', is_flag=True, help="Quiet mode")
+@click.option('-v', '--verbose', is_flag=True, help="Verbose mode")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=True)
-def exec(containers_dir: Path, image: str, quiet: bool, command: tuple[str, ...]) -> None:
-    """Run a command inside a built container (uses the exact nspawn profile from build time)."""
-    logger = setup_logger(quiet=quiet)
+def exec(containers_dir: Path, image: str, verbose: bool, command: tuple[str, ...]) -> None:
+    """Run a command inside a built container."""
+    logger = setup_logger(verbose=verbose)
 
     if os.geteuid() != 0:
         logger.error("ERROR: Must be run as root")
@@ -116,16 +115,15 @@ def exec(containers_dir: Path, image: str, quiet: bool, command: tuple[str, ...]
 
     manifest = Manifest.from_subvolume(container_path)
 
-    logger.info(f"→ Running in {image}: {' '.join(command)}")
+    logger.info(f"Running in {image}: {' '.join(command)}")
 
     exec_in_container(
         root=container_path,
         command=list(command),
         nspawn_template=manifest.nspawn_template,
-        quiet=quiet
     )
 
-    logger.info(f"✅ Command finished in {image}")
+    logger.info(f"Command finished in {image}")
 
 
 if __name__ == "__main__":

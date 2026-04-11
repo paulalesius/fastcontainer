@@ -2,20 +2,19 @@
 import logging
 import sys
 
-def setup_logger(quiet: bool = False) -> logging.Logger:
+def setup_logger(verbose: bool = False) -> logging.Logger:
     """Configure a clean logger for fastcontainer.
 
-    Progress messages (INFO) are always shown.
-    Tool commands (DEBUG) are hidden when quiet=True.
+    Default (no -v): clean ASCII progress messages only (INFO).
+    With -v/--verbose: full step output + internal debug messages.
     """
-    # Clean output format (no timestamps, just the message)
+    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(message)s",
         stream=sys.stdout,
-        force=True,          # re-configure if called again
+        force=True,
     )
-
     logger = logging.getLogger("fastcontainer")
-    logger.setLevel(logging.DEBUG if not quiet else logging.INFO)
+    logger.setLevel(level)
     return logger
