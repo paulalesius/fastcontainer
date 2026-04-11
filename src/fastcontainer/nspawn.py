@@ -16,6 +16,12 @@ def execute(root: Path, command: str, nspawn_template: List[str], quiet: bool = 
     # Replace placeholder {{ROOT}} with actual container root path
     args = [arg.replace("{{ROOT}}", str(root)) for arg in nspawn_template]
 
+    # --register=no + --hostname= fix nspawn errors from long temp snapshot names
+    if "--register=no" not in args:
+        args.append("--register=no")
+    if not any(a.startswith("--hostname=") for a in args):
+        args.append("--hostname=build")
+
     # Always quiet nspawn itself — we control output
     if "--quiet" not in args:
         args.append("--quiet")
