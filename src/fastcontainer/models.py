@@ -89,6 +89,17 @@ class NspawnProfile:
             cmd=cmd,
             steps=effective_steps,
         )
+    @property
+    def fingerprint(self) -> str:
+        """Stable content hash of what will actually be built."""
+        parts = []
+        # All resolved steps in order
+        for step in self.steps:
+            parts.append(step.cmd or "")
+        # Final resolved nspawn flags (order matters for nspawn)
+        parts.append("\n".join(self.nspawn))
+        content = "\n---\n".join(parts).encode("utf-8")
+        return hashlib.sha1(content).hexdigest()
 
 @dataclass(frozen=True)
 class BaseSpec:

@@ -28,7 +28,9 @@ class Builder:
         self.logger = logger or logging.getLogger("fastcontainer")
         self.post_build_cmd = post_build_cmd
 
-        self.final_name = f"{spec.base.effective_name}-{profile.name}-{spec.yaml_hash}"
+        self.final_name = (
+            f"{spec.base.effective_name}-{profile.name}-{profile.fingerprint}"
+        )
         self.final_path = self.containers_dir / self.final_name
 
     def _run_post_build(self, cmd: List[str] | str | None) -> None:
