@@ -97,11 +97,13 @@ class Builder:
         layer_path = self._layer_path(step_hash)
 
         if layer_path.is_dir():
-            self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
+            #self.logger.info(f"✅ Cache hit step {step.index}: {layer_path.name}")
+            preview = (step.cmd or "—").splitlines()[0]
+            self.logger.info(f"[CACHE] Step {step.index}/{len(self.profile.steps)} → {preview}")
             return Layer(path=layer_path, hash=step_hash)
 
-        self.logger.info(f"\n[Step {step.index}/{len(self.profile.steps)}] RUN -> new layer {layer_path.name}")
-        self.logger.info(f"    Command:\n{step.cmd}")
+        preview = (step.cmd or "—").splitlines()[0]
+        self.logger.info(f"\n[BUILD] Step {step.index}/{len(self.profile.steps)} → {preview}")
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
@@ -134,7 +136,7 @@ class Builder:
         snapshot(temp_path, layer_path, quiet=self.quiet)
         delete(temp_path, quiet=self.quiet)
 
-        self.logger.info(f"  [OK] Layer {layer_path.name} created")
+        self.logger.info(f"  [DONE] Layer created")
         return Layer(path=layer_path, hash=step_hash)
 
     def build(self) -> None:
@@ -152,6 +154,10 @@ class Builder:
             base_path=self.containers_dir / self.spec.base.effective_name,
             base_name=self.spec.base.effective_name,
         )
+
+        self.logger.info(f"Building profile '{self.profile.name}'")
+        self.logger.info(f"Target image: {self.final_name}")
+        self.logger.info(f"Total steps: {len(self.profile.steps)}\n")
 
         step_logs: dict[str, dict[str, Any]] = {}
 
@@ -192,7 +198,7 @@ class Builder:
                 self._prune_intermediates()
                 self.logger.info(f"   (Intermediates __{self.spec.base.effective_name}-* were pruned on success)")
             else:
-                self.logger.info(f"   (Intermediate layers kept for reuse by other builds)")
+                self.logger.info(f"   (Intermediate layers kept)")
 
             self.logger.info(f"✅ Successfully built: {self.final_name}")
 
