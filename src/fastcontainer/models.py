@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 import yaml
 
+
 @dataclass(frozen=True)
 class NspawnProfile:
     """nspawn execution profile definition (now with proper inheritance for build steps)."""
@@ -25,6 +26,7 @@ class NspawnProfile:
         name: str,
         data: dict,
         resolved_profiles: Dict[str, "NspawnProfile"],
+        base_nspawn: List[str] | None = None,   # NEW: flags from base.add:
     ) -> "NspawnProfile":
         """Resolve a profile with extend + add/remove for flags AND steps."""
         extend_name = data.get("extend")
@@ -40,13 +42,18 @@ class NspawnProfile:
         if not isinstance(steps_raw, list):
             raise ValueError(f"Profile '{name}' 'steps:' must be a list of step dicts (RUN: ...)")
 
-        # === nspawn flags (unchanged) ===
+        # === nspawn flags ===
         if extend_name:
             if extend_name not in resolved_profiles:
                 raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
             effective = resolved_profiles[extend_name].nspawn[:]
         else:
+            # Root profile: start with systemd-nspawn + base.add: flags
             effective = ["systemd-nspawn"]
+            if base_nspawn:
+                for flag in base_nspawn:
+                    if flag and flag not in effective:
+                        effective.append(flag)
 
         for item in add_raw:
             flag = str(item).strip()
@@ -93,6 +100,7 @@ class NspawnProfile:
             parent=parent_name,
             local_steps=local_steps,
         )
+
     @property
     def fingerprint(self) -> str:
         """Stable content hash of what will actually be built."""
@@ -105,12 +113,15 @@ class NspawnProfile:
         content = "\n---\n".join(parts).encode("utf-8")
         return hashlib.sha1(content).hexdigest()
 
+
 @dataclass(frozen=True)
 class BaseSpec:
-    """Base image specification - can be pre-existing or built via command."""
+    """Base image specification - can be pre-existing or built via command.
+    Now supports `add:` for default nspawn flags inherited by all profiles."""
     name: str
     create_cmd: str | None = None
     effective_name: str = ""
+    nspawn_add: List[str] = field(default_factory=list)  # NEW
 
     @classmethod
     def from_data(cls, data: Any) -> "BaseSpec":
@@ -136,7 +147,18 @@ class BaseSpec:
                     h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
                     effective_name = f"{name}-{h}"
 
-            return cls(name=name, create_cmd=create_cmd, effective_name=effective_name)
+            # NEW: support for base.add:
+            add_raw = data.get("add", [])
+            if not isinstance(add_raw, list):
+                raise ValueError("base.add must be a list")
+            nspawn_add = [str(item).strip() for item in add_raw if str(item).strip()]
+
+            return cls(
+                name=name,
+                create_cmd=create_cmd,
+                effective_name=effective_name,
+                nspawn_add=nspawn_add,
+            )
 
         raise ValueError("base must be a string or dict with 'name' key")
 
@@ -155,6 +177,7 @@ class Step:
         raw_cmd = data["RUN"]
         cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
         return cls(index=index, raw=data, cmd=cmd_str.strip() if cmd_str else None)
+
 
 @dataclass(frozen=True)
 class Layer:
@@ -247,7 +270,6 @@ class BuildSpec:
     yaml_path: Path
     yaml_hash: str
     profiles: Dict[str, NspawnProfile]
-    # steps: removed – now per-profile (tree of variants)
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
@@ -272,12 +294,17 @@ class BuildSpec:
         for name, data in profiles_raw.items():
             if not isinstance(data, dict):
                 raise ValueError(f"Profile '{name}' must be a dictionary")
-            resolved[name] = NspawnProfile.from_dict(name, data, resolved)
+            resolved[name] = NspawnProfile.from_dict(
+                name, data, resolved, base_nspawn=base.nspawn_add
+            )
 
         # Final validation
         for p in resolved.values():
             if "{{ROOT}}" not in " ".join(p.nspawn):
-                raise ValueError(f"Profile '{p.name}' is missing the required '{{ROOT}}' placeholder in flags")
+                raise ValueError(
+                    f"Profile '{p.name}' is missing the required '{{{{ROOT}}}}' "
+                    "placeholder in flags"
+                )
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
 

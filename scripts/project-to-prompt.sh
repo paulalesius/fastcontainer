@@ -1,1 +1,1 @@
-git ls-files; echo; git ls-files | grep -v "\.jpg$" | while read line; do echo "### START FILE: $line"; cat $line; echo -e "### END FILE $line\n"; done
+git ls-files; echo; git ls-files | grep -v "\.jpg$" | grep -v "LICENSE" | grep -v "README.md" | grep -v ".envrc" | grep -v ".gitignore" | while read line; do echo "### START FILE: $line"; cat $line; echo -e "### END FILE $line\n"; done

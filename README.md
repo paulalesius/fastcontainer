@@ -55,20 +55,36 @@ sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default -v
 The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_fingerprint>`.
 
 ### Base specification
-The `base:` key supports two formats (unchanged):
 
-1. Simple string:
+The `base:` key supports three formats:
+
+1. Simple string (assumes a pre-existing subvolume):
    ```yaml
    base: ubuntu-noble
    ```
 
-2. Dictionary with creation script (cached by hash):
+2. Dictionary with creation script (automatically cached by content hash):
    ```yaml
    base:
      name: ubuntu-custom
      create: |
        debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
    ```
+
+3. Dictionary with default nspawn flags (`add:` — new in v0.3.0):
+   ```yaml
+   base:
+     name: ubuntu24.04-cu132
+     create: |
+       debootstrap noble . http://archive.ubuntu.com/ubuntu/
+     add:
+       - --bind=/home/noname/fastcontainers/cache/apt-cache:/var/cache/apt
+       - --bind=/home/noname/fastcontainers/cache/apt-lists:/var/lib/apt/lists
+       # ... put all your common caching binds, NVIDIA driver binds, etc. here
+   ```
+
+**Best practice**: Use `base.add:` for any flags you want **every** profile to inherit (especially apt caches, ccache, cargo, uv, pip, downloads, NVIDIA driver binds, etc.).  
+These flags are automatically injected into every **root profile** (any profile without `extend:`) and then inherited normally by child profiles.
 
 ### Temporary subvolumes & pruning policy
 
@@ -89,8 +105,6 @@ After a successful build, `--prune` deletes **all** intermediate layers matching
 Final images (including parents in the inheritance chain) are **never** deleted, so child profiles and future builds can reuse them instantly.
 
 ### Profiles – tree of build variants (hierarchical execution)
-
-**This is the biggest change in v0.2.0+.**
 
 Profiles now form a proper inheritance tree with **hierarchical build execution**:
 
@@ -154,21 +168,6 @@ profiles:
 - Step order is always preserved (parent steps first).
 - The selected profile (`-p`) determines the exact step list used for the build.
 - Top-level `steps:` (old flat list) has been removed. Migrate by moving your steps under the root profile you usually use.
-
-### Migration from older YAMLs
-Move the old top-level `steps:` into your main/root profile:
-```yaml
-# Before (old)
-steps:
-  - RUN: ...
-
-# After (new)
-profiles:
-  default:
-    add: [...]
-    steps:
-      - RUN: ...
-```
 
 ### Post-build command (`cmd:`)
 Supports both list (argv) and free-form shell script (`|` block) – exactly like `RUN:`.
