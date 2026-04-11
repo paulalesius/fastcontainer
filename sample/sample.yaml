@@ -5,30 +5,24 @@ base:
     chroot . echo "test command inside chroot"
 
 profiles:
-  base:
-    nspawn:
-      - "systemd-nspawn"
+  default:
+    add:
       - "-D"
       - "{{ROOT}}"
       - "--tmpfs=/var/tmp"
       - "--private-users=no"
       - "--resolv-conf=replace-stub"
       - "--timezone=off"
-  default:
-    add: []
-    del: []
+    steps:
+      - RUN: |
+          apt-get update
+          apt-get install -y nginx curl
 
-steps:
-  - RUN: |
-      apt-get update
-      apt-get install -y nginx curl
+      - RUN: |
+          echo "Hello from fastcontainer layer 2" > /etc/motd
 
-  - RUN: |
-      echo "Hello from fastcontainer layer 2" > /etc/motd
-
-  - RUN: |
-      # Multi-line scripts work perfectly
-      # systemctl doesn't work in nspawn → enable nginx manually (standard container pattern)
-      mkdir -p /etc/systemd/system/multi-user.target.wants
-      ln -sf /lib/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service
-
+      - RUN: |
+          # Multi-line scripts work perfectly
+          # systemctl doesn't work in nspawn → enable nginx manually (standard container pattern)
+          mkdir -p /etc/systemd/system/multi-user.target.wants
+          ln -sf /lib/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service

@@ -101,31 +101,33 @@ class Builder:
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
 
-        snapshot(previous.path, temp_path)
+        try:
+            snapshot(previous.path, temp_path)
 
-        output = execute(temp_path, step.cmd, self.profile.nspawn, verbose=self.verbose)
+            output = execute(temp_path, step.cmd, self.profile.nspawn, verbose=self.verbose)
 
-        current_logs[f"{step.index:03d}"] = {
-            "command": step.cmd,
-            "output": output.splitlines()
-        }
+            current_logs[f"{step.index:03d}"] = {
+                "command": step.cmd,
+                "output": output.splitlines()
+            }
 
-        # Write per-layer manifest
-        manifest = Manifest.from_spec(
-            self.spec,
-            profile=self.profile,
-            final_name=self.final_name,
-            completed_logs=dict(current_logs),
-            stage="intermediate"
-        )
-        manifest_path = temp_path / "fastcontainer.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest.to_dict(), f, indent=2)
+            # Write per-layer manifest
+            manifest = Manifest.from_spec(
+                self.spec,
+                profile=self.profile,
+                final_name=self.final_name,
+                completed_logs=dict(current_logs),
+                stage="intermediate"
+            )
+            manifest_path = temp_path / "fastcontainer.json"
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest.to_dict(), f, indent=2)
 
-        snapshot(temp_path, layer_path)
-        delete(temp_path)
-
-        return Layer(path=layer_path, hash=step_hash)
+            snapshot(temp_path, layer_path)
+            return Layer(path=layer_path, hash=step_hash)
+        finally:
+            if temp_path.is_dir():
+                delete(temp_path)
 
     def _ensure_parent_built(self) -> None:
         """Recursively ensure the extended parent profile is built."""
@@ -175,12 +177,15 @@ class Builder:
 
         step_logs: dict[str, dict[str, Any]] = {}
         total_steps = len(self.profile.local_steps)
+        current_step = None
 
         try:
             for step in self.profile.local_steps:
+                current_step = step
                 current = self._build_layer(current, step, step_logs, total_steps)
         except Exception as e:
-            self.logger.error(f"Build failed at step {step.index if 'step' in locals() else '?'} in profile '{self.profile.name}'")
+            step_info = f"step {current_step.index}" if current_step is not None else "unknown step"
+            self.logger.error(f"Build failed at {step_info} in profile '{self.profile.name}'")
             raise
         else:
             self.logger.info("All steps completed successfully. Creating final image...")

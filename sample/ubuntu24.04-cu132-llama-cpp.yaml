@@ -51,13 +51,13 @@ profiles:
       - --bind=/dev/dri
       - --bind=/dev/nvidia-caps
       - --bind=/sys/module
-      # Bind NVIDIA Driver infrastructure from the host as we don't install the driver inside of the$
+      # Bind NVIDIA Driver infrastructure from the host as we don't install the driver inside
       # This is required when building things because they link to the driver
       - --bind-ro=/usr/lib64/libcuda.so.595.58.03
       - --bind-ro=/usr/lib64/libcuda.so.1
       - --bind-ro=/usr/lib64/libnvidia-ml.so.595.58.03
       - --bind-ro=/usr/lib64/libnvidia-ml.so.1
-      - --bind-ro=//usr/lib64/libnvidia-allocator.so.595.58.03
+      - --bind-ro=/usr/lib64/libnvidia-allocator.so.595.58.03
       - --bind-ro=/usr/bin/nvidia-smi
     steps:
       - RUN: |

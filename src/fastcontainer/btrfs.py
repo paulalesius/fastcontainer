@@ -1,7 +1,10 @@
 from pathlib import Path
 import subprocess
+import logging
 
 from .utils import run
+
+logger = logging.getLogger("fastcontainer")
 
 
 def is_btrfs_subvolume(path: Path | str) -> bool:
