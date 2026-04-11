@@ -9,14 +9,15 @@ from typing import Any, Dict, List
 
 import yaml
 
-
 @dataclass(frozen=True)
 class NspawnProfile:
-    """nspawn execution profile definition (now also carries build steps)."""
+    """nspawn execution profile definition (now with proper inheritance for build steps)."""
     name: str
     nspawn: List[str]           # full resolved list
     cmd: List[str] | str | None = None
-    steps: List[Step] = field(default_factory=list)  # NEW: inherited + own steps
+    steps: List[Step] = field(default_factory=list)  # full effective (for manifest/logs)
+    parent: str | None = None                    # NEW
+    local_steps: List[Step] = field(default_factory=list)  # NEW - only the delta steps
 
     @classmethod
     def from_dict(
@@ -25,7 +26,7 @@ class NspawnProfile:
         data: dict,
         resolved_profiles: Dict[str, "NspawnProfile"],
     ) -> "NspawnProfile":
-        """Resolve a profile with extend + add/remove for flags AND steps (tree of variants)."""
+        """Resolve a profile with extend + add/remove for flags AND steps."""
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
         remove_raw = data.get("remove", data.get("del", []))
@@ -39,26 +40,23 @@ class NspawnProfile:
         if not isinstance(steps_raw, list):
             raise ValueError(f"Profile '{name}' 'steps:' must be a list of step dicts (RUN: ...)")
 
-        # === nspawn flags (fixed: robust root handling, no more duplicate binary) ===
+        # === nspawn flags (unchanged) ===
         if extend_name:
             if extend_name not in resolved_profiles:
                 raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
             effective = resolved_profiles[extend_name].nspawn[:]
         else:
-            # Root profile: always start with the binary exactly once
             effective = ["systemd-nspawn"]
 
-        # Add this profile's flags (deduplicates automatically if someone puts the binary in YAML)
         for item in add_raw:
             flag = str(item).strip()
-            if flag and flag not in effective:   # ← prevents any accidental duplicate
+            if flag and flag not in effective:
                 effective.append(flag)
 
-        # Remove flags specified in remove/del
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
 
-        # === steps inheritance (unchanged, tree of variants) ===
+        # === steps inheritance - now track local/delta steps ===
         parsed_local_steps: List[Step] = []
         for i, s in enumerate(steps_raw, 1):
             parsed_local_steps.append(Step.from_dict(s, i))
@@ -66,10 +64,14 @@ class NspawnProfile:
         if extend_name:
             parent = resolved_profiles[extend_name]
             effective_steps: List[Step] = list(parent.steps)
-            for i, s in enumerate(parsed_local_steps, len(parent.steps) + 1):
-                effective_steps.append(replace(s, index=i))
+            for idx, s in enumerate(parsed_local_steps, len(parent.steps) + 1):
+                effective_steps.append(replace(s, index=idx))
+            local_steps = parsed_local_steps
+            parent_name = extend_name
         else:
             effective_steps = parsed_local_steps
+            local_steps = parsed_local_steps
+            parent_name = None
 
         # === cmd (unchanged) ===
         cmd: List[str] | str | None = None
@@ -88,6 +90,8 @@ class NspawnProfile:
             nspawn=effective,
             cmd=cmd,
             steps=effective_steps,
+            parent=parent_name,
+            local_steps=local_steps,
         )
     @property
     def fingerprint(self) -> str:

@@ -44,7 +44,7 @@ sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.y
 sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
 ```
 
-The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_yaml>`.
+The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_fingerprint>`.
 
 ### Base specification
 The `base:` key supports two formats (unchanged):
@@ -63,23 +63,42 @@ The `base:` key supports two formats (unchanged):
    ```
 
 ### Temporary subvolumes & pruning policy
-(unchanged – same safety guarantees, intermediate layers `__*`, final images, etc.)
 
-### Profiles – now a tree of build variants
-**This is the biggest change in v0.2.0.**
+fastcontainer uses btrfs subvolumes for fast, copy-on-write layered builds and precise caching:
 
-- Profiles define **both** nspawn flags (`add`/`remove`) **and** build steps (`steps`).
-- `extend:` now inherits **flags + steps**, letting you build a natural tree of variants from a common base.
-- All variants share the same base image but can have different intermediate layers.
-- Layer caching works perfectly across branches (shared prefix steps reuse the exact same btrfs subvolumes).
-- `cmd:` (post-build command) is still supported and can be a free-form shell script or argv list.
+- **Base image**: Stored under its `effective_name` (either the plain name or `name-<short-hash>` when a `create:` script is used).
+- **Intermediate cached layers**: Named `__<effective_base>-<40-character-sha1-hash>`.  
+  These are created for every `RUN` step and are **kept by default**.  
+  The hash is computed from the previous layer + the exact command + the profile’s full resolved nspawn flags, so caching works perfectly across the entire profile tree.
+- **Final profile images**: Named `<effective_base>-<profile>-<40-hex-fingerprint>`.
+- **Temporary working subvolumes**: Names starting with `_` (e.g. `_…-temp-…`, `_…-final-…`). These are automatically cleaned up after each step.
+
+**With hierarchical profiles (`extend:`)**:  
+Child profiles start from their parent’s *final image* (not from the base). Only the child’s own delta steps generate new intermediate layers. This maximises cache reuse across variants while keeping the build semantics users expect.
+
+**Pruning (`--prune` flag)**:  
+After a successful build, `--prune` deletes **all** intermediate layers matching `__<effective_base>-*` for that base.  
+Final images (including parents in the inheritance chain) are **never** deleted, so child profiles and future builds can reuse them instantly.
+
+### Profiles – tree of build variants (hierarchical execution)
+
+**This is the biggest change in v0.2.0+.**
+
+Profiles now form a proper inheritance tree with **hierarchical build execution**:
+
+- A root profile (no `extend`) is built from the base image using **only its own** nspawn flags and its `steps`.
+- When you build a child profile, fastcontainer first ensures the entire parent chain is built.
+- It then performs a **delta build**: only the child’s own additional `steps` are executed, using the child’s full merged nspawn flags (`add`/`remove` + inherited flags).
+- This lets child profiles safely use flags that only make sense *after* parent steps have run (e.g. `--user=agent`, `--chdir=/home/agent`, extra GPU binds, custom environment variables, etc.).
+
+The result is clean, predictable multi-stage builds that feel like proper inheritance while keeping perfect btrfs snapshot caching.
 
 #### YAML structure
 ```yaml
 base: ...
 
 profiles:
-  common:                          # root profile (defines base steps + flags)
+  common:                          # root profile
     add:
       - "systemd-nspawn"
       - "-D"
@@ -90,25 +109,35 @@ profiles:
       - RUN: |
           apt-get update
           apt-get install -y curl git
+          # user creation, base packages, etc. can go here
 
-  cuda:                            # first branch – inherits common steps
+  cuda:                            # first child – inherits from common
     extend: common
     add: [...]                     # extra GPU flags
     steps:
       - RUN: |
-          # CUDA-specific steps...
+          # CUDA-specific steps (run with cuda flags)
 
-  llama-cpp:                       # deeper branch – inherits common + cuda
+  llama-cpp:                       # deeper child
     extend: cuda
     steps:
       - RUN: |
           git clone https://github.com/ggml-org/llama.cpp.git
-          # build steps...
+          # build steps (run with llama-cpp flags)
 
-  minimal:                         # alternative short variant
+  run-llama-cpp:                   # runtime variant
+    extend: llama-cpp
+    add:
+      - --user=agent
+      - --chdir=/home/agent
+      # ... more runtime binds
+    cmd: |
+      echo "=== Starting llama-bench ==="
+      /llama.cpp/build/bin/llama-bench ...
+
+  minimal:                         # alternative branch
     extend: common
     steps: []                      # no extra steps
-```
 
 #### Key rules
 - Root profiles (no `extend`) must provide a full `add:` list of flags.
