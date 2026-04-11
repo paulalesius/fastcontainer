@@ -92,7 +92,12 @@ class Builder:
         if not step.cmd:
             return previous
 
-        content = previous.hash.encode() + step.cmd.encode("utf-8")
+        nspawn_context = "\n".join(self.profile.nspawn)  # stable string of all resolved flags
+        content = (
+            previous.hash.encode()
+            + step.cmd.encode("utf-8")
+            + nspawn_context.encode("utf-8")
+        )
         step_hash = hashlib.sha1(content).hexdigest()
         layer_path = self._layer_path(step_hash)
 
