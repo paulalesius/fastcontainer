@@ -26,3 +26,7 @@ profiles:
           # systemctl doesn't work in nspawn → enable nginx manually (standard container pattern)
           mkdir -p /etc/systemd/system/multi-user.target.wants
           ln -sf /lib/systemd/system/nginx.service /etc/systemd/system/multi-user.target.wants/nginx.service
+    check: |
+      # Rebuild if nginx is missing or too old
+      dpkg -l nginx 2>/dev/null | grep -q '^ii' || exit 1
+      nginx -v 2>&1 | grep -q '1.2[4-9]'

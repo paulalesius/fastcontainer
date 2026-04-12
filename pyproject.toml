@@ -1,6 +1,6 @@
 [project]
 name = "fastcontainer"
-version = "0.3.0"
+version = "0.4.0"
 description = "Minimal btrfs + systemd-nspawn layered container builder"
 readme = "README.md"
 license = { text = "MIT" }

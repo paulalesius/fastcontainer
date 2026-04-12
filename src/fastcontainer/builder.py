@@ -6,7 +6,7 @@ from typing import Any, List
 
 from .models import BuildSpec, Layer, Manifest, Step, NspawnProfile
 from .btrfs import snapshot, delete, create
-from .nspawn import execute, exec_in_container
+from .nspawn import execute, exec_in_container, check_in_container
 from .utils import run_and_capture
 
 import logging
@@ -149,10 +149,41 @@ class Builder:
 
     def build(self) -> None:
         if self.final_path.is_dir():
-            self.logger.info(f"Image already exists: {self.final_name}")
-            cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
-            self._run_post_build(cmd_to_run)
-            return
+            if self.profile.check:
+                self.logger.info(f"Image exists: {self.final_name} – running check...")
+                if check_in_container(
+                    root=self.final_path,
+                    command=self.profile.check,
+                    nspawn_template=self.profile.nspawn,
+                    verbose=self.verbose,
+                ):
+                    self.logger.info("✓ Check passed → using cached image")
+                    cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
+                    self._run_post_build(cmd_to_run)
+                    return
+                else:
+                    self.logger.warning("✗ Check failed → deleting cache and forcing full rebuild...")
+                    delete(self.final_path)
+
+                    # Force rebuild of this profile's steps by clearing all intermediate layers
+                    self.logger.info("Clearing intermediate layers for forced rebuild...")
+                    prefix = f"__{self.spec.base.effective_name}-"
+                    deleted = 0
+                    for p in list(self.containers_dir.iterdir()):
+                        if (p.is_dir() and p.name.startswith(prefix)
+                                and len(p.name) == len(prefix) + 40
+                                and all(c in "0123456789abcdef" for c in p.name[len(prefix):])):
+                            delete(p, commit=False)
+                            deleted += 1
+                    if deleted:
+                        self.logger.info(f"Deleted {deleted} intermediate layer(s) → steps will re-execute")
+                    else:
+                        self.logger.info("No intermediate layers to clear")
+            else:
+                self.logger.info(f"Image already exists: {self.final_name}")
+                cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
+                self._run_post_build(cmd_to_run)
+                return
 
         self.logger.info(f"Building profile: {self.profile.name}")
         if self.profile.parent:

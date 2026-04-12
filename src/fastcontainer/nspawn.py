@@ -60,3 +60,33 @@ def exec_in_container(root: Path, command: List[str] | str | None, nspawn_templa
 
     # Key change: inherit the real terminal → nspawn does the ioctl + resize handling
     subprocess.run(full_cmd, check=True)
+
+def check_in_container(
+    root: Path, command: str | None, nspawn_template: List[str], verbose: bool = False
+) -> bool:
+    """Run a check snippet inside an existing container.
+    Returns True if exit code == 0, False otherwise.
+    On failure the full output is printed (via run_and_capture).
+    """
+    if not command or not command.strip():
+        return True
+
+    strict_script = f"set -eo pipefail\n{command}"
+
+    args = [arg.replace("{{ROOT}}", str(root)) for arg in nspawn_template]
+    if "--register=no" not in args:
+        args.append("--register=no")
+    if not any(a.startswith("--hostname=") for a in args):
+        args.append("--hostname=check")
+    # we deliberately do NOT add --quiet so the check output is visible on failure
+    args += ["/bin/bash", "-l", "-c", strict_script]
+
+    try:
+        run_and_capture(args, verbose=verbose)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.info(f"Check failed (exit {e.returncode}) → will force rebuild")
+        return False
+    except Exception as e:
+        logger.warning(f"Could not run check: {e} → will force rebuild")
+        return False

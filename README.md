@@ -71,7 +71,7 @@ The `base:` key supports three formats:
        debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
    ```
 
-3. Dictionary with default nspawn flags (`add:` — new in v0.3.0):
+3. Dictionary with default nspawn flags (`add:` — new in v0.4.0+):
    ```yaml
    base:
      name: ubuntu24.04-cu132
@@ -156,6 +156,9 @@ profiles:
     cmd: |
       echo "=== Starting llama-bench ==="
       /llama.cpp/build/bin/llama-bench ...
+    check: |
+      test -x /llama.cpp/build/bin/llama-bench || exit 1
+      /llama.cpp/build/bin/llama-bench --help >/dev/null 2>&1
 
   minimal:                         # alternative branch
     extend: common
@@ -171,6 +174,34 @@ profiles:
 
 ### Post-build command (`cmd:`)
 Supports both list (argv) and free-form shell script (`|` block) – exactly like `RUN:`.
+
+### Cache invalidation with `check:` (new in v0.4.0)
+
+Each profile can now define an optional `check:` key containing a shell snippet.
+
+When the final image for a profile **already exists**, fastcontainer runs this check **inside** the container before deciding whether to use the cache:
+
+- If the check exits with code **0** → cached image is used (fast path).
+- If the check exits with any other code → the final image **and all its intermediate layers** are deleted, and the profile is **fully rebuilt** from scratch.
+
+This gives you dynamic, content-aware cache busting without changing the fingerprint.
+
+```yaml
+  run-ik_llama-hermes-test:
+    extend: ik_llama-cpp
+    check: |
+      # Rebuild if the hermes binary is missing or the server doesn't respond
+      test -x /home/user/hermes-agent/venv/bin/hermes || exit 1
+      curl -f http://localhost:8080/health >/dev/null 2>&1 || exit 1
+    # ... rest of profile
+```
+
+**Tips:**
+- Use `exit 1` during development to force a rebuild every time.
+- Real checks can test for installed packages, binary versions, git commit hashes, model files, etc.
+- The check output is always shown on failure (even without `-v`).
+- The check command is stored in `fastcontainer.json` inside the final image.
+- Intermediate layers are automatically cleared on failure so delta steps actually re-execute.
 
 ### Build with pruning
 ```bash

@@ -19,6 +19,7 @@ class NspawnProfile:
     steps: List[Step] = field(default_factory=list)  # full effective (for manifest/logs)
     parent: str | None = None                    # NEW
     local_steps: List[Step] = field(default_factory=list)  # NEW - only the delta steps
+    check: str | None = None
 
     @classmethod
     def from_dict(
@@ -92,6 +93,17 @@ class NspawnProfile:
             else:
                 raise ValueError(f"Profile '{name}' cmd: must be a string or list")
 
+        # === check (NEW) ===
+        check_raw = data.get("check")
+        check: str | None = None
+        if check_raw is not None:
+            if isinstance(check_raw, list):
+                check_str = "\n".join(str(x).strip() for x in check_raw if str(x).strip())
+                check = check_str if check_str else None
+            else:
+                check_str = str(check_raw).strip()
+                check = check_str if check_str else None
+
         return cls(
             name=name,
             nspawn=effective,
@@ -99,6 +111,7 @@ class NspawnProfile:
             steps=effective_steps,
             parent=parent_name,
             local_steps=local_steps,
+            check=check,
         )
 
     @property
@@ -203,6 +216,7 @@ class Manifest:
     steps: int
     built_at: str
     logs: Dict[str, Dict[str, Any]]
+    check: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -214,6 +228,7 @@ class Manifest:
             "profile": self.profile,
             "nspawn_template": self.nspawn_template,
             "default_cmd": self.default_cmd,
+            "check": self.check,
             "stage": self.stage,
             "steps": self.steps,
             "built_at": self.built_at,
@@ -236,6 +251,7 @@ class Manifest:
             profile=profile.name,
             nspawn_template=profile.nspawn[:],
             default_cmd=profile.cmd,
+            check=profile.check,
             stage=stage,
             steps=len(completed_logs),
             built_at=datetime.now().isoformat(),
@@ -257,6 +273,7 @@ class Manifest:
             profile=data["profile"],
             nspawn_template=data["nspawn_template"],
             default_cmd=data.get("default_cmd"),
+            check=data.get("check"),
             stage=data["stage"],
             steps=data["steps"],
             built_at=data["built_at"],
