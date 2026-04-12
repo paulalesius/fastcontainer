@@ -1,15 +1,16 @@
 from pathlib import Path
 from typing import List
 
+import subprocess
+import logging
+
 from .utils import run_and_capture
+
+logger = logging.getLogger("fastcontainer")
 
 
 def execute(root: Path, command: str, nspawn_template: List[str], verbose: bool = False) -> str:
-    """Execute a command inside the container using the profile's nspawn template.
-
-    Strict error handling so a failing command stops the build immediately.
-    Output control is delegated to run_and_capture.
-    """
+    """Execute a command inside the container (used during build - captured output)."""
     strict_script = f"set -eo pipefail\n{command}"
 
     args = [arg.replace("{{ROOT}}", str(root)) for arg in nspawn_template]
@@ -27,9 +28,12 @@ def execute(root: Path, command: str, nspawn_template: List[str], verbose: bool 
 
 
 def exec_in_container(root: Path, command: List[str] | str | None, nspawn_template: List[str], verbose: bool = False) -> None:
-    """Run a command (post-build cmd or CLI exec) inside an existing container.
+    """Run a command (post-build cmd or `fastcontainer exec`) inside an existing container.
 
-    Always shows output for user commands (post-build / exec).
+    THIS IS THE FIX:
+      • We now inherit stdin/stdout/stderr instead of piping.
+      • nspawn gets a real PTY → automatic TIOCSWINSZ + SIGWINCH forwarding.
+      • Correct $COLUMNS/$LINES, dynamic resize support, full ncurses support.
     """
     if command is None:
         return
@@ -44,5 +48,15 @@ def exec_in_container(root: Path, command: List[str] | str | None, nspawn_templa
     else:
         full_cmd = args + command
 
-    # User-facing commands (post-build or exec) always show output
-    run_and_capture(full_cmd, verbose=True)
+    # Good defaults (same as before)
+    if "--register=no" not in args:
+        full_cmd.insert(len(args) - len(command) if isinstance(command, list) else len(args), "--register=no")
+    if not any(a.startswith("--hostname=") for a in args):
+        full_cmd.insert(len(args) - len(command) if isinstance(command, list) else len(args), "--hostname=fastcontainer-exec")
+    if "--quiet" not in args:
+        full_cmd.insert(len(args) - len(command) if isinstance(command, list) else len(args), "--quiet")
+
+    logger.debug("-> " + " ".join(map(str, full_cmd)))
+
+    # Key change: inherit the real terminal → nspawn does the ioctl + resize handling
+    subprocess.run(full_cmd, check=True)
