@@ -60,8 +60,6 @@ sudo fastcontainer build ... -D HOST_CACHE=/home/noname/.cache -D HF_CACHE=/home
 **In your YAML:**
 ```yaml
 add:
-  - "-D"
-  - "{{ROOT}}"
   - "--bind=${HOST_CACHE}:/root/.cache"
   - "--bind=${HF_CACHE}:/root/.cache/huggingface"
 ```
