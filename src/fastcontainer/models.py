@@ -185,6 +185,8 @@ class NspawnProfile:
             parts.append(step.cmd or "")
         # Final resolved nspawn flags (order matters for nspawn)
         parts.append("\n".join(self.nspawn))
+        # check: is now part of the image identity
+        parts.append(self.check or "")
         content = "\n---\n".join(parts).encode("utf-8")
         return hashlib.sha1(content).hexdigest()
 

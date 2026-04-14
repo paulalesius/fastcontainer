@@ -12,7 +12,25 @@ from .models import BuildSpec, Manifest
 from .builder import Builder
 from .nspawn import exec_in_container
 from .log import setup_logger
+from contextlib import contextmanager
 
+@contextmanager
+def acquire_build_lock(containers_dir: Path):
+    """Exclusive lock so only one build runs at a time."""
+    lock_path = containers_dir / ".fastcontainer.lock"
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield lock_fd
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                lock_fd.close()
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
@@ -60,54 +78,39 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
             sys.exit(1)
         variables[key] = value.strip()
 
-    lock_path = containers_dir / ".fastcontainer.lock"
-    lock_fd = None
+    # === Exclusive lock for the entire build ===
     try:
-        lock_fd = open(lock_path, "w")
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with acquire_build_lock(containers_dir):
+            spec = BuildSpec.from_yaml(prepare_yaml, variables=variables)
+
+            if profile not in spec.profiles:
+                if profile == "base":
+                    logger.error("ERROR: 'base' is a reserved special profile and cannot be selected")
+                else:
+                    logger.error(f"ERROR: Profile '{profile}' not found. Available: {list(spec.profiles.keys())}")
+                sys.exit(1)
+
+            selected_profile = spec.profiles[profile]
+
+            post_cmd = list(command) if command else None
+
+            builder = Builder(
+                containers_dir=containers_dir,
+                spec=spec,
+                profile=selected_profile,
+                prune=prune,
+                verbose=verbose,
+                logger=logger,
+                post_build_cmd=post_cmd,
+                run_cmd=True,
+            )
+            builder.build()
     except BlockingIOError:
         logger.error(f"ERROR: Another fastcontainer build is already running in {containers_dir}")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"ERROR: Failed to acquire lock: {e}")
-        sys.exit(1)
-
-    try:
-        spec = BuildSpec.from_yaml(prepare_yaml, variables=variables)
-
-        if profile not in spec.profiles:
-            if profile == "base":
-                logger.error("ERROR: 'base' is a reserved special profile and cannot be selected")
-            else:
-                logger.error(f"ERROR: Profile '{profile}' not found. Available: {list(spec.profiles.keys())}")
-            sys.exit(1)
-
-        selected_profile = spec.profiles[profile]
-
-        post_cmd = list(command) if command else None
-
-        builder = Builder(
-            containers_dir=containers_dir,
-            spec=spec,
-            profile=selected_profile,
-            prune=prune,
-            verbose=verbose,
-            logger=logger,
-            post_build_cmd=post_cmd,
-        )
-        builder.build()
-    except Exception as e:
         logger.error(f"ERROR: Build failed: {e}")
         sys.exit(1)
-    finally:
-        if lock_fd is not None:
-            try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
-                lock_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
 
 @main.command()
 @click.argument("containers_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path, resolve_path=True))

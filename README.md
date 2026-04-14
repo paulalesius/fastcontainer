@@ -5,6 +5,21 @@ fastcontainer - Minimal btrfs + systemd-nspawn layered container builder
   <img src="logo.jpg" alt="fastcontainer">
 </div>
 
+### Installation
+
+```bash
+# 1. Clone the repository (replace with your actual URL)
+git clone https://github.com/yourname/fastcontainer.git
+cd fastcontainer
+
+# 2. Recommended: install with uv (fastest, matches the sample scripts)
+uv sync --force-reinstall
+
+# Alternative: install with pip (editable mode)
+# pip install --force-reinstall -e .
+
+```
+
 ### Design Philosophy — Built for R&D, not production hardening
 
 **fastcontainer is an R&D tool first and foremost.**
@@ -13,32 +28,33 @@ It is deliberately optimized for **maximum flexibility, speed of iteration, and 
 
 This means it makes the following intentional trade-offs:
 
-- Runs as root and uses full systemd-nspawn with generous host bindings (devices, /dev, /sys, user directories, etc.).
+- Runs as root and uses full systemd-nspawn with generous host bindings (devices, `/dev`, `/sys`, user directories, etc.).
 - Prioritizes direct hardware access (NVIDIA GPUs, CUDA toolkit, etc.) over container isolation.
 - Does **not** implement rootless mode, seccomp, AppArmor, or other production-grade sandboxing by default.
 - Focuses on developer velocity: one YAML file, instant btrfs snapshot caching, profile inheritance for build variants, and free-form shell scripts in `RUN:` / `cmd:`.
 
-**In short:**
+**In short:**  
 If you want to quickly spin up a reproducible environment with full GPU access, install whatever you want, bind your entire home directory for cache, and iterate in seconds — fastcontainer is perfect.
 
 If you need a hardened, production-ready, multi-tenant container platform, this is **not** the tool for you (use Podman, Docker, or Kubernetes instead).
 
 The goal is to feel closer to a super-powered `chroot + debootstrap + script` workflow than to a security-first container runtime.
 
-### Usage
+### Quick Start
+
 ```bash
 sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-D KEY=VALUE]... [-- <command...>]
 
-sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-v]
+sudo fastcontainer exec <containers_dir> <image-name> <command...> [-v]
 ```
 
 ### Variables in nspawn flags (`-D`)
 
-fastcontainer supports shell-style variable expansion inside **any string** in `add:` lists (including the new `base.add:`).
+fastcontainer supports shell-style variable expansion **inside `add:` lists** (including `base.add:`).
 
 **Command line syntax:**
 ```bash
-sudo fastcontainer build ... -D KEY1=value1 -D KEY2=value2 ...
+sudo fastcontainer build ... -D HOST_CACHE=/home/noname/.cache -D HF_CACHE=/home/noname/.cache/huggingface
 ```
 
 **In your YAML:**
@@ -55,69 +71,131 @@ add:
 - Variables are expanded **before** fingerprint calculation and root validation, so caching stays perfectly reproducible.
 - Undefined variables cause an immediate build error with a helpful message.
 
-This is especially useful for host-specific paths (caches, home directories, driver versions, Hugging Face cache, etc.).
+### Profiles & Inheritance (v0.5.0)
 
-### Logging / Output
-- **Default** (no `-v`): clean, plain ASCII progress only — shows current profile + each step as it is built.
-- `-v` / `--verbose`: full live output of every build step + internal commands.
-- **On failure**: the complete output of the failing step is **always** printed (even without `-v`) before exiting.
+Profiles are the heart of fastcontainer. They support full inheritance:
 
-### Examples
-```bash
-# Build default variant with a variable
-sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default \
-  -D HOST_CACHE=/home/noname/.cache
+```yaml
+profiles:
+  common:
+    add:
+      - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+    steps:
+      - RUN: |
+          apt-get update && apt-get install -y ...
 
-# Build a specialized variant (inherits common steps + adds its own)
-sudo fastcontainer build /disk/fastcontainer ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama-cpp \
-  -D HF_CACHE=/home/noname/.cache/huggingface
+  cuda:
+    extend: common          # inherits flags + steps from "common"
+    steps:
+      - RUN: |
+          # CUDA-specific steps
 
-# Run post-build command from profile (or override it)
-sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
-
-# Verbose build (shows full step output)
-sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default -v
+  run-llama-cpp:
+    extend: cuda
+    add:
+      - "--bind=/dev/nvidia0"
+      # ... more GPU binds
+    cmd: |
+      echo "=== Starting benchmark ==="
+      /llama.cpp/build/bin/llama-bench ...
+    check: |
+      # optional check that forces rebuild if it fails
+      test -f /llama.cpp/build/bin/llama-bench
 ```
 
-The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_fingerprint>`.
+**Key rules (v0.5.0):**
+
+- `extend:` pulls in **all** flags and steps from the parent.
+- `add:` appends new flags (child flags always come **after** parent flags).
+- `remove:` (or `del:`) removes specific flags.
+- `steps:` are additive (child steps run **after** parent steps).
+- `cmd:` and `check:` are **not** inherited — they only apply to the profile where they are defined.
+- Only the **final (leaf) profile** ever executes a `cmd:` (or the optional trailing CLI command). Parent profiles never run `cmd:`.
 
 ### Base specification
 
-The `base:` key supports three formats:
+```yaml
+base:
+  name: ubuntu24.04-cu132
+  create: |
+    debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+  add:                          # optional default flags for every profile
+    - "--bind=${HOST_CACHE}:/var/cache/apt"
+```
 
-1. Simple string (assumes a pre-existing subvolume):
-   ```yaml
-   base: ubuntu-noble
-   ```
+### `check:` (now part of cache key)
 
-2. Dictionary with creation script (automatically cached by content hash):
-   ```yaml
-   base:
-     name: ubuntu-custom
-     create: |
-       debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
-   ```
+```yaml
+check: |
+  dpkg -l nginx 2>/dev/null | grep -q '^ii' || exit 1
+  nginx -v 2>&1 | grep -q '1.2[4-9]'
+```
 
-3. Dictionary with default nspawn flags (`add:` — new in v0.4.0+):
-   ```yaml
-   base:
-     name: ubuntu24.04-cu132
-     create: |
-       debootstrap noble . http://archive.ubuntu.com/ubuntu/
-     add:
-       - --bind=${HOST_CACHE}:/var/cache/apt
-       - --bind=${HOST_CACHE}:/var/lib/apt/lists
-   ```
+- If the image exists, the check is executed inside it.
+- If the check fails, the image is deleted and a full rebuild is forced.
+- **Important (v0.5.0):** The check script is now included in the image fingerprint. Changing the check always produces a new final image name.
 
-**Best practice**: Use `base.add:` (or variables in root profiles) for any flags you want **every** profile to inherit (especially apt caches, ccache, cargo, uv, pip, downloads, NVIDIA driver binds, etc.).
+### Post-build command (`cmd:`)
 
-(The rest of the README — Temporary subvolumes, Profiles tree, Post-build command, `check:`, etc. — remains unchanged and accurate.)
+You can define a default command that runs automatically after a successful build:
 
----
+```yaml
+cmd: |
+  echo "=== Starting llama-bench ==="
+  /llama.cpp/build/bin/llama-bench ...
+```
 
-**Note on evolving specification**
-The YAML format is stable for the new profile tree. Container deletion policy and advanced cleanup commands are still planned for future releases.
+You can also override it from the CLI:
 
-Contributing & Development
---------------------------
-Run `./scripts/project-to-prompt.sh` to generate a ready-to-paste prompt with all source files.
+```bash
+sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
+```
+
+Only the final profile’s `cmd:` (or the CLI override) is executed.
+
+### Logging / Output
+
+- **Default** (no `-v`): clean, plain ASCII progress only.
+- `-v` / `--verbose`: full live output of every build step + internal commands.
+- **On failure**: the complete output of the failing step is **always** printed (even without `-v`).
+
+### Examples
+
+```bash
+# Basic build with variable
+sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default \
+  -D HOST_CACHE=/home/noname/.cache
+
+# Full GPU + runtime variant
+sudo fastcontainer build /disk/fastcontainer ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama-cpp
+
+# Run a one-off command instead of the profile's cmd:
+sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
+
+# Verbose build
+sudo fastcontainer build ... -v
+```
+
+Final image name format:  
+`<effective_base>-<profile>-<40hex_fingerprint>`
+
+### Other features
+
+- `--prune`: delete all intermediate layers after a successful build.
+- Automatic build lock (`.fastcontainer.lock`) — prevents two builds from running at the same time in the same directory.
+- All temporary subvolumes are cleaned up on success or failure.
+- Every intermediate and final layer contains a `fastcontainer.json` manifest with full build history.
+
+### Contributing & Development
+
+```bash
+# Regenerate the full source prompt for AI assistance
+bash scripts/project-to-prompt.sh
+```
+
+Run tests with:
+```bash
+uv sync
+# (tests coming in future releases)
+```

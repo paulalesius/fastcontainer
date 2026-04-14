@@ -8,9 +8,6 @@ profiles:
   # Root profile — common setup steps shared by all variants
   common:
     add:
-      - "systemd-nspawn"
-      - "-D"
-      - "{{ROOT}}"
       - "--tmpfs=/var/tmp"
       - "--private-users=no"
       - "--resolv-conf=replace-stub"

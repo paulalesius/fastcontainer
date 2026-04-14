@@ -18,7 +18,8 @@ class Builder:
 
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
                  prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
-                 post_build_cmd: List[str] | str | None = None):
+                 post_build_cmd: List[str] | str | None = None,
+                 run_cmd: bool = True):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
@@ -26,6 +27,7 @@ class Builder:
         self.verbose = verbose
         self.logger = logger or logging.getLogger("fastcontainer")
         self.post_build_cmd = post_build_cmd
+        self.run_cmd = run_cmd
 
         self.final_name = (
             f"{spec.base.effective_name}-{profile.name}-{profile.fingerprint}"
@@ -129,6 +131,14 @@ class Builder:
             if temp_path.is_dir():
                 delete(temp_path)
 
+    def _get_cmd_to_run(self) -> List[str] | str | None:
+        """Only the leaf profile (or explicit CLI post-command) runs a cmd:.
+        Parents (run_cmd=False) never execute any post-build command.
+        """
+        if not self.run_cmd:
+            return None
+        return self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
+
     def _ensure_parent_built(self) -> None:
         """Recursively ensure the extended parent profile is built."""
         if not self.profile.parent:
@@ -143,6 +153,7 @@ class Builder:
             verbose=self.verbose,
             logger=self.logger,
             post_build_cmd=None,
+            run_cmd=False,
         )
         parent_builder.build()
         self.logger.info(f"Parent '{parent_profile.name}' ready")
@@ -158,31 +169,15 @@ class Builder:
                     verbose=self.verbose,
                 ):
                     self.logger.info("Check passed - using cached image")
-                    cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
-                    self._run_post_build(cmd_to_run)
+                    self._run_post_build(self._get_cmd_to_run())
                     return
                 else:
                     self.logger.warning("Check failed - deleting cache and forcing rebuild")
                     delete(self.final_path)
 
-                    # Force rebuild of this profile's steps by clearing all intermediate layers
-                    self.logger.info("Clearing intermediate layers for forced rebuild...")
-                    prefix = f"__{self.spec.base.effective_name}-"
-                    deleted = 0
-                    for p in list(self.containers_dir.iterdir()):
-                        if (p.is_dir() and p.name.startswith(prefix)
-                                and len(p.name) == len(prefix) + 40
-                                and all(c in "0123456789abcdef" for c in p.name[len(prefix):])):
-                            delete(p, commit=False)
-                            deleted += 1
-                    if deleted:
-                        self.logger.info(f"Deleted {deleted} intermediate layer(s)")
-                    else:
-                        self.logger.info("No intermediate layers to clear")
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
-                cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
-                self._run_post_build(cmd_to_run)
+                self._run_post_build(self._get_cmd_to_run())
                 return
 
         self.logger.info(f"Building profile: {self.profile.name}")
@@ -247,8 +242,7 @@ class Builder:
 
             self.logger.info(f"Successfully built: {self.final_name}")
 
-            cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
-            self._run_post_build(cmd_to_run)
+            self._run_post_build(self._get_cmd_to_run())
 
     def _prune_intermediates(self) -> None:
         self.logger.info("Pruning intermediate layers...")
