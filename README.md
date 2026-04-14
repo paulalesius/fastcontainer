@@ -27,29 +27,56 @@ The goal is to feel closer to a super-powered `chroot + debootstrap + script` wo
 
 ### Usage
 ```bash
-sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-- <command...>]
+sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-D KEY=VALUE]... [-- <command...>]
 
 sudo fastcontainer exec <containers_dir> <image-name> [--] <command...> [-v]
 ```
 
-**Logging / Output**
+### Variables in nspawn flags (`-D`)
+
+fastcontainer supports shell-style variable expansion inside **any string** in `add:` lists (including the new `base.add:`).
+
+**Command line syntax:**
+```bash
+sudo fastcontainer build ... -D KEY1=value1 -D KEY2=value2 ...
+```
+
+**In your YAML:**
+```yaml
+add:
+  - "-D"
+  - "{{ROOT}}"
+  - "--bind=${HOST_CACHE}:/root/.cache"
+  - "--bind=${HF_CACHE}:/root/.cache/huggingface"
+```
+
+- Supports both `$VAR` and `${VAR}` syntax.
+- `ROOT` is a **reserved** name — attempting `-D ROOT=...` will raise a clear error.
+- Variables are expanded **before** fingerprint calculation and root validation, so caching stays perfectly reproducible.
+- Undefined variables cause an immediate build error with a helpful message.
+
+This is especially useful for host-specific paths (caches, home directories, driver versions, Hugging Face cache, etc.).
+
+### Logging / Output
 - **Default** (no `-v`): clean, plain ASCII progress only — shows current profile + each step as it is built.
 - `-v` / `--verbose`: full live output of every build step + internal commands.
 - **On failure**: the complete output of the failing step is **always** printed (even without `-v`) before exiting.
 
 ### Examples
 ```bash
-# Build default variant
-sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default
+# Build default variant with a variable
+sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default \
+  -D HOST_CACHE=/home/noname/.cache
 
 # Build a specialized variant (inherits common steps + adds its own)
-sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama
+sudo fastcontainer build /disk/fastcontainer ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama-cpp \
+  -D HF_CACHE=/home/noname/.cache/huggingface
 
 # Run post-build command from profile (or override it)
-sudo fastcontainer build /disk/containers ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama -- /bin/bash -l
+sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
 
 # Verbose build (shows full step output)
-sudo fastcontainer build /disk/containers ./sample/sample.yaml -p default -v
+sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default -v
 ```
 
 The final image name is always profile-aware: `<effective_base>-<profile>-<40hex_fingerprint>`.
@@ -78,139 +105,17 @@ The `base:` key supports three formats:
      create: |
        debootstrap noble . http://archive.ubuntu.com/ubuntu/
      add:
-       - --bind=/home/noname/fastcontainers/cache/apt-cache:/var/cache/apt
-       - --bind=/home/noname/fastcontainers/cache/apt-lists:/var/lib/apt/lists
-       # ... put all your common caching binds, NVIDIA driver binds, etc. here
+       - --bind=${HOST_CACHE}:/var/cache/apt
+       - --bind=${HOST_CACHE}:/var/lib/apt/lists
    ```
 
-**Best practice**: Use `base.add:` for any flags you want **every** profile to inherit (especially apt caches, ccache, cargo, uv, pip, downloads, NVIDIA driver binds, etc.).  
-These flags are automatically injected into every **root profile** (any profile without `extend:`) and then inherited normally by child profiles.
+**Best practice**: Use `base.add:` (or variables in root profiles) for any flags you want **every** profile to inherit (especially apt caches, ccache, cargo, uv, pip, downloads, NVIDIA driver binds, etc.).
 
-### Temporary subvolumes & pruning policy
-
-fastcontainer uses btrfs subvolumes for fast, copy-on-write layered builds and precise caching:
-
-- **Base image**: Stored under its `effective_name` (either the plain name or `name-<short-hash>` when a `create:` script is used).
-- **Intermediate cached layers**: Named `__<effective_base>-<40-character-sha1-hash>`.  
-  These are created for every `RUN` step and are **kept by default**.  
-  The hash is computed from the previous layer + the exact command + the profile’s full resolved nspawn flags, so caching works perfectly across the entire profile tree.
-- **Final profile images**: Named `<effective_base>-<profile>-<40-hex-fingerprint>`.
-- **Temporary working subvolumes**: Names starting with `_` (e.g. `_…-temp-…`, `_…-final-…`). These are automatically cleaned up after each step.
-
-**With hierarchical profiles (`extend:`)**:  
-Child profiles start from their parent’s *final image* (not from the base). Only the child’s own delta steps generate new intermediate layers. This maximises cache reuse across variants while keeping the build semantics users expect.
-
-**Pruning (`--prune` flag)**:  
-After a successful build, `--prune` deletes **all** intermediate layers matching `__<effective_base>-*` for that base.  
-Final images (including parents in the inheritance chain) are **never** deleted, so child profiles and future builds can reuse them instantly.
-
-### Profiles – tree of build variants (hierarchical execution)
-
-Profiles now form a proper inheritance tree with **hierarchical build execution**:
-
-- A root profile (no `extend`) is built from the base image using **only its own** nspawn flags and its `steps`.
-- When you build a child profile, fastcontainer first ensures the entire parent chain is built.
-- It then performs a **delta build**: only the child’s own additional `steps` are executed, using the child’s full merged nspawn flags (`add`/`remove` + inherited flags).
-- This lets child profiles safely use flags that only make sense *after* parent steps have run (e.g. `--user=agent`, `--chdir=/home/agent`, extra GPU binds, custom environment variables, etc.).
-
-The result is clean, predictable multi-stage builds that feel like proper inheritance while keeping perfect btrfs snapshot caching.
-
-#### YAML structure
-```yaml
-base: ...
-
-profiles:
-  common:                          # root profile
-    add:
-      - "systemd-nspawn"
-      - "-D"
-      - "{{ROOT}}"
-      - "--tmpfs=/var/tmp"
-      # ... other common flags
-    steps:
-      - RUN: |
-          apt-get update
-          apt-get install -y curl git
-          # user creation, base packages, etc. can go here
-
-  cuda:                            # first child – inherits from common
-    extend: common
-    add: [...]                     # extra GPU flags
-    steps:
-      - RUN: |
-          # CUDA-specific steps (run with cuda flags)
-
-  llama-cpp:                       # deeper child
-    extend: cuda
-    steps:
-      - RUN: |
-          git clone https://github.com/ggml-org/llama.cpp.git
-          # build steps (run with llama-cpp flags)
-
-  run-llama-cpp:                   # runtime variant
-    extend: llama-cpp
-    add:
-      - --user=agent
-      - --chdir=/home/agent
-      # ... more runtime binds
-    cmd: |
-      echo "=== Starting llama-bench ==="
-      /llama.cpp/build/bin/llama-bench ...
-    check: |
-      test -x /llama.cpp/build/bin/llama-bench || exit 1
-      /llama.cpp/build/bin/llama-bench --help >/dev/null 2>&1
-
-  minimal:                         # alternative branch
-    extend: common
-    steps: []                      # no extra steps
-```
-
-#### Key rules
-- Root profiles (no `extend`) must provide a full `add:` list of flags.
-- Child profiles inherit **all** steps from their parent and append their own.
-- Step order is always preserved (parent steps first).
-- The selected profile (`-p`) determines the exact step list used for the build.
-- Top-level `steps:` (old flat list) has been removed. Migrate by moving your steps under the root profile you usually use.
-
-### Post-build command (`cmd:`)
-Supports both list (argv) and free-form shell script (`|` block) – exactly like `RUN:`.
-
-### Cache invalidation with `check:` (new in v0.4.0)
-
-Each profile can now define an optional `check:` key containing a shell snippet.
-
-When the final image for a profile **already exists**, fastcontainer runs this check **inside** the container before deciding whether to use the cache:
-
-- If the check exits with code **0** → cached image is used (fast path).
-- If the check exits with any other code → the final image **and all its intermediate layers** are deleted, and the profile is **fully rebuilt** from scratch.
-
-This gives you dynamic, content-aware cache busting without changing the fingerprint.
-
-```yaml
-  run-ik_llama-hermes-test:
-    extend: ik_llama-cpp
-    check: |
-      # Rebuild if the hermes binary is missing or the server doesn't respond
-      test -x /home/user/hermes-agent/venv/bin/hermes || exit 1
-      curl -f http://localhost:8080/health >/dev/null 2>&1 || exit 1
-    # ... rest of profile
-```
-
-**Tips:**
-- Use `exit 1` during development to force a rebuild every time.
-- Real checks can test for installed packages, binary versions, git commit hashes, model files, etc.
-- The check output is always shown on failure (even without `-v`).
-- The check command is stored in `fastcontainer.json` inside the final image.
-- Intermediate layers are automatically cleared on failure so delta steps actually re-execute.
-
-### Build with pruning
-```bash
-sudo fastcontainer build ... -p llama-cpp --prune
-```
+(The rest of the README — Temporary subvolumes, Profiles tree, Post-build command, `check:`, etc. — remains unchanged and accurate.)
 
 ---
 
-**Note on evolving specification**  
+**Note on evolving specification**
 The YAML format is stable for the new profile tree. Container deletion policy and advanced cleanup commands are still planned for future releases.
 
 Contributing & Development

@@ -34,8 +34,10 @@ def main() -> None:
 @click.option('-v', '--verbose', is_flag=True,
               help="Verbose mode: show full output of each build step and internal commands (default: clean progress only).")
 @click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build.")
+@click.option('-D', '--define', 'defines', multiple=True, metavar='KEY=VALUE',
+              help='Define a variable KEY=VALUE for use inside add: flags (repeatable).')
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=False)
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, command: tuple[str, ...]) -> None:
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, defines: tuple[str, ...] = (), command: tuple[str, ...] = ()) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn.
 
     Optional trailing command (after --) will be executed inside the final image.
@@ -45,6 +47,18 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
     if os.geteuid() != 0:
         logger.error("ERROR: This program must be run as root (use sudo)")
         sys.exit(1)
+
+    variables: dict[str, str] = {}
+    for d in defines:
+        if '=' not in d:
+            logger.error(f"ERROR: Invalid -D flag: '{d}'. Use the format KEY=VALUE")
+            sys.exit(1)
+        key, value = d.split('=', 1)
+        key = key.strip()
+        if not key or not key.isidentifier():
+            logger.error(f"ERROR: Invalid variable name in -D: '{key}' (must be a valid identifier)")
+            sys.exit(1)
+        variables[key] = value.strip()
 
     lock_path = containers_dir / ".fastcontainer.lock"
     lock_fd = None
@@ -59,7 +73,7 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
         sys.exit(1)
 
     try:
-        spec = BuildSpec.from_yaml(prepare_yaml)
+        spec = BuildSpec.from_yaml(prepare_yaml, variables=variables)
 
         if profile not in spec.profiles:
             if profile == "base":

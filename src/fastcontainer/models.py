@@ -4,10 +4,32 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Any, Dict, List
 
 import yaml
+
+def _expand_variables(text: str, variables: dict[str, str], profile_name: str) -> str:
+    """Expand $VAR and ${VAR} inside flag strings. ROOT is reserved."""
+    def replacer(match: re.Match[str]) -> str:
+        var_name = match.group(1) or match.group(2)
+        if var_name == "ROOT":
+            raise ValueError(
+                f"Profile '{profile_name}': ROOT is a reserved built-in placeholder.\n"
+                f"You cannot set it with -D ROOT=... — fastcontainer manages {{ROOT}} automatically."
+            )
+        if var_name not in variables:
+            raise ValueError(
+                f"Profile '{profile_name}': Undefined variable '${var_name}'.\n"
+                f"Pass it on the command line with -D {var_name}=value"
+            )
+        return variables[var_name]
+
+    # Support both ${VAR} and $VAR (shell style)
+    text = re.sub(r'\$\{([^}]+)\}', replacer, text)
+    text = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replacer, text)
+    return text
 
 def _validate_no_manual_root_flags(profile_name: str, flags: List[str]) -> None:
     """Raise a clear build error if the user manually specifies the root directory flag.
@@ -58,9 +80,12 @@ class NspawnProfile:
         name: str,
         data: dict,
         resolved_profiles: Dict[str, "NspawnProfile"],
-        base_nspawn: List[str] | None = None,   # NEW: flags from base.add:
+        base_nspawn: List[str] | None = None,
+        variables: dict[str, str] | None = None,
     ) -> "NspawnProfile":
         """Resolve a profile with extend + add/remove for flags AND steps."""
+        if variables is None:
+            variables = {}
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
         remove_raw = data.get("remove", data.get("del", []))
@@ -94,6 +119,9 @@ class NspawnProfile:
 
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
+
+        # expand variables (this happens before root validation + fingerprint)
+        effective = [_expand_variables(flag, variables, name) for flag in effective]
 
         # enforce that root is only ever set via {{ROOT}}
         _validate_no_manual_root_flags(name, effective)
@@ -194,7 +222,6 @@ class BaseSpec:
                     h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
                     effective_name = f"{name}-{h}"
 
-            # NEW: support for base.add:
             add_raw = data.get("add", [])
             if not isinstance(add_raw, list):
                 raise ValueError("base.add must be a list")
@@ -323,7 +350,11 @@ class BuildSpec:
     profiles: Dict[str, NspawnProfile]
 
     @classmethod
-    def from_yaml(cls, yaml_path: Path) -> "BuildSpec":
+    def from_yaml(cls, yaml_path: Path, variables: dict[str, str] | None = None) -> "BuildSpec":
+        """variables is the dict of -D KEY=VALUE passed from the CLI."""
+        if variables is None:
+            variables = {}
+
         if not yaml_path.is_file():
             raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
 
@@ -373,7 +404,9 @@ class BuildSpec:
 
             # Now safe to instantiate (parent is guaranteed resolved)
             profile = NspawnProfile.from_dict(
-                name, data, resolved, base_nspawn=base.nspawn_add
+                name, data, resolved,
+                base_nspawn=base.nspawn_add,
+                variables=variables,
             )
             resolved[name] = profile
             visiting.remove(name)
