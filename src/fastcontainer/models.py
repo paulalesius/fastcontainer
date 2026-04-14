@@ -306,16 +306,50 @@ class BuildSpec:
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
             raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
 
-        # Resolve profiles (flags + steps inheritance)
-        resolved: Dict[str, NspawnProfile] = {}
+        # First collect all raw profile data (decouples from YAML key order)
+        profile_data: Dict[str, dict] = {}
         for name, data in profiles_raw.items():
             if not isinstance(data, dict):
                 raise ValueError(f"Profile '{name}' must be a dictionary")
-            resolved[name] = NspawnProfile.from_dict(
+            profile_data[name] = data
+
+        # Resolve profiles with dependency support (any order + cycle detection)
+        resolved: Dict[str, NspawnProfile] = {}
+        visiting: set[str] = set()
+
+        def resolve_profile(name: str) -> NspawnProfile:
+            """Recursively resolve a profile and its parents (DFS with cycle detection)."""
+            if name in resolved:
+                return resolved[name]
+            if name not in profile_data:
+                raise ValueError(f"Profile '{name}' not found in YAML")
+
+            if name in visiting:
+                raise ValueError(f"Circular dependency detected involving profile '{name}'")
+
+            visiting.add(name)
+            data = profile_data[name]
+            extend_name = data.get("extend")
+
+            if extend_name:
+                if extend_name == name:
+                    raise ValueError(f"Profile '{name}' cannot extend itself")
+                # Ensure parent is resolved first
+                resolve_profile(extend_name)
+
+            # Now safe to instantiate (parent is guaranteed resolved)
+            profile = NspawnProfile.from_dict(
                 name, data, resolved, base_nspawn=base.nspawn_add
             )
+            resolved[name] = profile
+            visiting.remove(name)
+            return profile
 
-        # Final validation
+        # Resolve every profile (triggers recursive parent resolution as needed)
+        for name in list(profile_data.keys()):
+            resolve_profile(name)
+
+        # Final validation (unchanged)
         for p in resolved.values():
             if "{{ROOT}}" not in " ".join(p.nspawn):
                 raise ValueError(
