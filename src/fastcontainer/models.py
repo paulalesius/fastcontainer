@@ -9,6 +9,37 @@ from typing import Any, Dict, List
 
 import yaml
 
+def _validate_no_manual_root_flags(profile_name: str, flags: List[str]) -> None:
+    """Raise a clear build error if the user manually specifies the root directory flag.
+
+    Allowed only: the exact pattern '-D' immediately followed by '{{ROOT}}'.
+    Everything else is forbidden (including --directory=, -D=something, -D /hardcoded/path, etc.).
+    """
+    i = 0
+    while i < len(flags):
+        flag = str(flags[i]).strip()
+
+        if flag == "-D":
+            # Must be followed by exactly "{{ROOT}}"
+            if i + 1 >= len(flags) or str(flags[i + 1]).strip() != "{{ROOT}}":
+                raise ValueError(
+                    f"Profile '{profile_name}': '-D' can ONLY be used as:\n"
+                    f"    - '-D'\n"
+                    f"    - '{{{{ROOT}}}}'\n\n"
+                    f"You are not allowed to specify the container root path yourself.\n"
+                    f"fastcontainer manages -D {{ROOT}} automatically."
+                )
+            i += 2
+            continue
+
+        if flag.startswith(("--directory", "-D=")):
+            raise ValueError(
+                f"Profile '{profile_name}': '--directory' / '-D=' flags are forbidden.\n"
+                f"Use the built-in '{{{{ROOT}}}}' placeholder instead.\n"
+                f"fastcontainer is the only component allowed to set the container root."
+            )
+
+        i += 1
 
 @dataclass(frozen=True)
 class NspawnProfile:
@@ -63,6 +94,9 @@ class NspawnProfile:
 
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
+
+        # enforce that root is only ever set via {{ROOT}}
+        _validate_no_manual_root_flags(name, effective)
 
         # === steps inheritance - now track local/delta steps ===
         parsed_local_steps: List[Step] = []
@@ -348,14 +382,6 @@ class BuildSpec:
         # Resolve every profile (triggers recursive parent resolution as needed)
         for name in list(profile_data.keys()):
             resolve_profile(name)
-
-        # Final validation (unchanged)
-        for p in resolved.values():
-            if "{{ROOT}}" not in " ".join(p.nspawn):
-                raise ValueError(
-                    f"Profile '{p.name}' is missing the required '{{{{ROOT}}}}' "
-                    "placeholder in flags"
-                )
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
 
