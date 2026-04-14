@@ -134,7 +134,7 @@ class Builder:
         if not self.profile.parent:
             return
         parent_profile = self.spec.profiles[self.profile.parent]
-        self.logger.info(f"Building parent profile: {parent_profile.name} first")
+        self.logger.info(f"Building parent profile: {parent_profile.name}")
         parent_builder = Builder(
             containers_dir=self.containers_dir,
             spec=self.spec,
@@ -150,19 +150,19 @@ class Builder:
     def build(self) -> None:
         if self.final_path.is_dir():
             if self.profile.check:
-                self.logger.info(f"Image exists: {self.final_name} – running check...")
+                self.logger.info(f"Image exists: {self.final_name} - running check")
                 if check_in_container(
                     root=self.final_path,
                     command=self.profile.check,
                     nspawn_template=self.profile.nspawn,
                     verbose=self.verbose,
                 ):
-                    self.logger.info("✓ Check passed → using cached image")
+                    self.logger.info("Check passed - using cached image")
                     cmd_to_run = self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
                     self._run_post_build(cmd_to_run)
                     return
                 else:
-                    self.logger.warning("✗ Check failed → deleting cache and forcing full rebuild...")
+                    self.logger.warning("Check failed - deleting cache and forcing rebuild")
                     delete(self.final_path)
 
                     # Force rebuild of this profile's steps by clearing all intermediate layers
@@ -176,7 +176,7 @@ class Builder:
                             delete(p, commit=False)
                             deleted += 1
                     if deleted:
-                        self.logger.info(f"Deleted {deleted} intermediate layer(s) → steps will re-execute")
+                        self.logger.info(f"Deleted {deleted} intermediate layer(s)")
                     else:
                         self.logger.info("No intermediate layers to clear")
             else:
@@ -187,7 +187,7 @@ class Builder:
 
         self.logger.info(f"Building profile: {self.profile.name}")
         if self.profile.parent:
-            self.logger.info(f"  (extends {self.profile.parent})")
+            self.logger.info(f"  extends: {self.profile.parent}")
 
         self._ensure_base_exists()
 
