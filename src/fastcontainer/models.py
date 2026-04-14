@@ -10,26 +10,27 @@ from typing import Any, Dict, List
 
 import yaml
 
-def _expand_variables(text: str, variables: dict[str, str], profile_name: str) -> str:
-    """Expand $VAR and ${VAR} inside flag strings. ROOT is reserved."""
+def _expand_variables(text: str, variables: dict[str, str], context: str) -> str:
+    """Expand ONLY the new {{VAR}} syntax.
+    - {{ROOT}} is a special preserved placeholder.
+    - Any other {{VAR}} that is not defined with -D will raise a clear error.
+    """
+    if not text or not isinstance(text, str):
+        return text
+
     def replacer(match: re.Match[str]) -> str:
-        var_name = match.group(1) or match.group(2)
+        var_name = match.group(1).strip()
         if var_name == "ROOT":
-            raise ValueError(
-                f"Profile '{profile_name}': ROOT is a reserved built-in placeholder.\n"
-                f"You cannot set it with -D ROOT=... — fastcontainer manages {{ROOT}} automatically."
-            )
+            return "{{ROOT}}"          # special placeholder - do NOT expand
         if var_name not in variables:
             raise ValueError(
-                f"Profile '{profile_name}': Undefined variable '${var_name}'.\n"
+                f"{context}: Undefined variable '{{{{ {var_name} }}}}'.\n"
                 f"Pass it on the command line with -D {var_name}=value"
             )
         return variables[var_name]
 
-    # Support both ${VAR} and $VAR (shell style)
-    text = re.sub(r'\$\{([^}]+)\}', replacer, text)
-    text = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replacer, text)
-    return text
+    # Only {{VAR}} syntax is supported now
+    return re.sub(r'\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}', replacer, text)
 
 def _validate_no_manual_root_flags(profile_name: str, flags: List[str]) -> None:
     """Raise a clear build error if the user manually specifies the root directory flag.
@@ -83,14 +84,18 @@ class NspawnProfile:
         base_nspawn: List[str] | None = None,
         variables: dict[str, str] | None = None,
     ) -> "NspawnProfile":
-        """Resolve a profile with extend + add/remove for flags AND steps."""
+        """Resolve a profile with extend + add/remove for flags AND steps.
+        ONLY {{VAR}} syntax is supported (as requested).
+        """
         if variables is None:
             variables = {}
+
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
         remove_raw = data.get("remove", data.get("del", []))
         cmd_raw = data.get("cmd")
         steps_raw = data.get("steps", [])
+        check_raw = data.get("check")
 
         if not isinstance(add_raw, list):
             raise ValueError(f"Profile '{name}' 'add:' must be a list")
@@ -105,7 +110,6 @@ class NspawnProfile:
                 raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
             effective = resolved_profiles[extend_name].nspawn[:]
         else:
-            # Root profile: start with systemd-nspawn + base.add: flags
             effective = ["systemd-nspawn"]
             if base_nspawn:
                 for flag in base_nspawn:
@@ -120,16 +124,20 @@ class NspawnProfile:
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
 
-        # expand variables (this happens before root validation + fingerprint)
-        effective = [_expand_variables(flag, variables, name) for flag in effective]
+        # === Expand ONLY {{VAR}} in add: flags ===
+        effective = [
+            _expand_variables(str(flag), variables, f"Profile '{name}' add:")
+            for flag in effective
+        ]
 
-        # enforce that root is only ever set via {{ROOT}}
         _validate_no_manual_root_flags(name, effective)
 
-        # === steps inheritance - now track local/delta steps ===
+        # === steps (ONLY {{VAR}}) ===
         parsed_local_steps: List[Step] = []
         for i, s in enumerate(steps_raw, 1):
-            parsed_local_steps.append(Step.from_dict(s, i))
+            parsed_local_steps.append(
+                Step.from_dict(s, i, variables=variables, profile_name=name)
+            )
 
         if extend_name:
             parent = resolved_profiles[extend_name]
@@ -143,28 +151,32 @@ class NspawnProfile:
             local_steps = parsed_local_steps
             parent_name = None
 
-        # === cmd (unchanged) ===
+        # === cmd: (ONLY {{VAR}}) ===
         cmd: List[str] | str | None = None
         if cmd_raw is not None:
             if isinstance(cmd_raw, str):
                 cmd_str = cmd_raw.strip()
-                cmd = cmd_str if cmd_str else None
+                if cmd_str:
+                    cmd_str = _expand_variables(cmd_str, variables, f"Profile '{name}' cmd:")
+                    cmd = cmd_str
             elif isinstance(cmd_raw, list):
-                cmd_list = [str(x) for x in cmd_raw if str(x).strip()]
+                cmd_list = [
+                    _expand_variables(str(x).strip(), variables, f"Profile '{name}' cmd:")
+                    for x in cmd_raw if str(x).strip()
+                ]
                 cmd = cmd_list if cmd_list else None
             else:
                 raise ValueError(f"Profile '{name}' cmd: must be a string or list")
 
-        # === check (NEW) ===
-        check_raw = data.get("check")
+        # === check: (ONLY {{VAR}}) ===
         check: str | None = None
         if check_raw is not None:
             if isinstance(check_raw, list):
                 check_str = "\n".join(str(x).strip() for x in check_raw if str(x).strip())
-                check = check_str if check_str else None
             else:
                 check_str = str(check_raw).strip()
-                check = check_str if check_str else None
+            if check_str:
+                check = _expand_variables(check_str, variables, f"Profile '{name}' check:")
 
         return cls(
             name=name,
@@ -201,7 +213,7 @@ class BaseSpec:
     nspawn_add: List[str] = field(default_factory=list)  # NEW
 
     @classmethod
-    def from_data(cls, data: Any) -> "BaseSpec":
+    def from_data(cls, data: Any, variables: dict[str, str] | None = None) -> "BaseSpec":
         if isinstance(data, str):
             if not data.strip():
                 raise ValueError("base cannot be empty")
@@ -219,10 +231,17 @@ class BaseSpec:
 
             if create_raw:
                 cmd_str = "\n".join(create_raw) if isinstance(create_raw, list) else str(create_raw)
-                create_cmd = cmd_str.strip()
+                create_cmd = cmd_str.strip() if cmd_str.strip() else None
+                effective_name = name
+
                 if create_cmd:
+                    # hash is computed on the original (unexpanded) command → stable base name
                     h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
                     effective_name = f"{name}-{h}"
+                    if variables:
+                        create_cmd = _expand_variables(
+                            create_cmd, variables, f"Base '{name}' create:"
+                        )
 
             add_raw = data.get("add", [])
             if not isinstance(add_raw, list):
@@ -238,7 +257,6 @@ class BaseSpec:
 
         raise ValueError("base must be a string or dict with 'name' key")
 
-
 @dataclass(frozen=True)
 class Step:
     index: int
@@ -246,14 +264,24 @@ class Step:
     cmd: str | None = None
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], index: int) -> "Step":
+    def from_dict(
+        cls, data: Dict[str, Any], index: int,
+        variables: dict[str, str], profile_name: str
+    ) -> "Step":
         if not isinstance(data, dict) or "RUN" not in data:
             return cls(index=index, raw=data)
 
         raw_cmd = data["RUN"]
         cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
-        return cls(index=index, raw=data, cmd=cmd_str.strip() if cmd_str else None)
 
+        if cmd_str.strip():
+            # ONLY {{VAR}} — legacy $VAR is NOT expanded here
+            expanded = _expand_variables(
+                cmd_str, variables, f"Profile '{profile_name}' RUN step {index}"
+            )
+            return cls(index=index, raw=data, cmd=expanded.strip())
+
+        return cls(index=index, raw=data, cmd=None)
 
 @dataclass(frozen=True)
 class Layer:
@@ -367,7 +395,7 @@ class BuildSpec:
         if base_raw is None:
             raise ValueError("YAML must contain 'base:'")
 
-        base = BaseSpec.from_data(base_raw)
+        base = BaseSpec.from_data(base_raw, variables=variables)
 
         profiles_raw = spec.get("profiles")
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:

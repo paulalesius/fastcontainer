@@ -17,7 +17,6 @@ uv sync --force-reinstall
 
 # Alternative: install with pip (editable mode)
 # pip install --force-reinstall -e .
-
 ```
 
 ### Design Philosophy — Built for R&D, not production hardening
@@ -48,28 +47,46 @@ sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--pr
 sudo fastcontainer exec <containers_dir> <image-name> <command...> [-v]
 ```
 
-### Variables in nspawn flags (`-D`)
+### Variables (`-D`)
 
-fastcontainer supports shell-style variable expansion **inside `add:` lists** (including `base.add:`).
+fastcontainer supports variable substitution using the **`{{VAR}}`** syntax **everywhere** in the YAML file:
+
+- `add:` (nspawn flags)
+- `RUN:` steps
+- `check:`
+- `cmd:`
+- `base.create:`
 
 **Command line syntax:**
 ```bash
-sudo fastcontainer build ... -D HOST_CACHE=/home/noname/.cache -D HF_CACHE=/home/noname/.cache/huggingface
+sudo fastcontainer build ... \
+  -D HOST_CACHE=/home/noname/.cache \
+  -D HF_CACHE=/home/noname/.cache/huggingface
 ```
 
-**In your YAML:**
+**Example YAML:**
+
 ```yaml
 add:
-  - "--bind=${HOST_CACHE}:/root/.cache"
-  - "--bind=${HF_CACHE}:/root/.cache/huggingface"
+  - "--bind={{HOST_CACHE}}:/root/.cache"
+  - "--bind={{HF_CACHE}}:/root/.cache/huggingface"
+
+steps:
+  - RUN: |
+      echo "Host cache is {{HOST_CACHE}}"
+      export PATH={{MY_PATH}}:$$PATH         # note: $$ escapes real shell $PATH
+
+check: |
+  test -d "{{HF_CACHE}}" || exit 1
 ```
 
-- Supports both `$VAR` and `${VAR}` syntax.
-- `ROOT` is a **reserved** name — attempting `-D ROOT=...` will raise a clear error.
-- Variables are expanded **before** fingerprint calculation and root validation, so caching stays perfectly reproducible.
-- Undefined variables cause an immediate build error with a helpful message.
+**Rules:**
+- Only `{{VAR}}` syntax is supported.
+- `{{ROOT}}` is a **reserved** special placeholder. It is automatically replaced by the actual container path at runtime. Do **not** define it with `-D ROOT=...`.
+- Any other `{{VAR}}` that is not passed via `-D` will cause an immediate clear build error.
+- Variables are expanded before fingerprint calculation, so caching remains reliable and reproducible.
 
-### Profiles & Inheritance (v0.5.0)
+### Profiles & Inheritance (v0.5.0+)
 
 Profiles are the heart of fastcontainer. They support full inheritance:
 
@@ -102,14 +119,14 @@ profiles:
       test -f /llama.cpp/build/bin/llama-bench
 ```
 
-**Key rules (v0.5.0):**
+**Key rules:**
 
 - `extend:` pulls in **all** flags and steps from the parent.
 - `add:` appends new flags (child flags always come **after** parent flags).
 - `remove:` (or `del:`) removes specific flags.
 - `steps:` are additive (child steps run **after** parent steps).
 - `cmd:` and `check:` are **not** inherited — they only apply to the profile where they are defined.
-- Only the **final (leaf) profile** ever executes a `cmd:` (or the optional trailing CLI command). Parent profiles never run `cmd:`.
+- Only the **final (leaf) profile** ever executes a `cmd:` (or the optional trailing CLI command).
 
 ### Base specification
 
@@ -119,20 +136,15 @@ base:
   create: |
     debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
   add:                          # optional default flags for every profile
-    - "--bind=${HOST_CACHE}:/var/cache/apt"
+    - "--bind={{HOST_CACHE}}:/var/cache/apt"
 ```
 
-### `check:` (now part of cache key)
+### `check:` (part of cache key)
 
-```yaml
-check: |
-  dpkg -l nginx 2>/dev/null | grep -q '^ii' || exit 1
-  nginx -v 2>&1 | grep -q '1.2[4-9]'
-```
+If the final image already exists, the `check:` script is executed inside it.  
+If it fails, the image is deleted and a full rebuild is forced.
 
-- If the image exists, the check is executed inside it.
-- If the check fails, the image is deleted and a full rebuild is forced.
-- **Important (v0.5.0):** The check script is now included in the image fingerprint. Changing the check always produces a new final image name.
+The check script is included in the image fingerprint, so changing it always produces a new final image.
 
 ### Post-build command (`cmd:`)
 
@@ -150,8 +162,6 @@ You can also override it from the CLI:
 sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
 ```
 
-Only the final profile’s `cmd:` (or the CLI override) is executed.
-
 ### Logging / Output
 
 - **Default** (no `-v`): clean, plain ASCII progress only.
@@ -161,7 +171,7 @@ Only the final profile’s `cmd:` (or the CLI override) is executed.
 ### Examples
 
 ```bash
-# Basic build with variable
+# Basic build with variables
 sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default \
   -D HOST_CACHE=/home/noname/.cache
 
@@ -175,7 +185,7 @@ sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
 sudo fastcontainer build ... -v
 ```
 
-Final image name format:  
+**Final image name format:**  
 `<effective_base>-<profile>-<40hex_fingerprint>`
 
 ### Other features
@@ -190,10 +200,4 @@ Final image name format:
 ```bash
 # Regenerate the full source prompt for AI assistance
 bash scripts/project-to-prompt.sh
-```
-
-Run tests with:
-```bash
-uv sync
-# (tests coming in future releases)
 ```
