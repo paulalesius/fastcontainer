@@ -11,17 +11,12 @@ from typing import Any, Dict, List
 import yaml
 
 def _expand_variables(text: str, variables: dict[str, str], context: str) -> str:
-    """Expand ONLY the new {{VAR}} syntax.
-    - {{ROOT}} is a special preserved placeholder.
-    - Any other {{VAR}} that is not defined with -D will raise a clear error.
-    """
+    """Expand ONLY {{VAR}} syntax. ROOT is no longer a user placeholder."""
     if not text or not isinstance(text, str):
         return text
 
     def replacer(match: re.Match[str]) -> str:
         var_name = match.group(1).strip()
-        if var_name == "ROOT":
-            return "{{ROOT}}"          # special placeholder - do NOT expand
         if var_name not in variables:
             raise ValueError(
                 f"{context}: Undefined variable '{{{{ {var_name} }}}}'.\n"
@@ -29,8 +24,25 @@ def _expand_variables(text: str, variables: dict[str, str], context: str) -> str
             )
         return variables[var_name]
 
-    # Only {{VAR}} syntax is supported now
     return re.sub(r'\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}', replacer, text)
+
+def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
+    """Completely forbid the user from specifying the root directory.
+    fastcontainer now injects it automatically."""
+    for i, item in enumerate(flags):
+        flag = str(item).strip()
+        if flag in ("-D", "--directory") or flag.startswith(("--directory=", "-D=")):
+            raise ValueError(
+                f"Profile '{profile_name}': Do NOT specify -D, --directory or any root path.\n"
+                f"fastcontainer automatically adds '-D <root>' for you.\n"
+                f"Remove any such lines from your 'add:' section."
+            )
+        # Catch the old two-line pattern users used to write
+        if flag == "-D" and i + 1 < len(flags) and str(flags[i + 1]).strip() == "{{ROOT}}":
+            raise ValueError(
+                f"Profile '{profile_name}': Do NOT specify '-D' and '{{{{ROOT}}}}' anymore.\n"
+                f"fastcontainer now injects the correct directory flag automatically."
+            )
 
 def _validate_no_manual_root_flags(profile_name: str, flags: List[str]) -> None:
     """Raise a clear build error if the user manually specifies the root directory flag.
@@ -130,7 +142,8 @@ class NspawnProfile:
             for flag in effective
         ]
 
-        _validate_no_manual_root_flags(name, effective)
+        # NEW: forbid any manual directory specification
+        _forbid_manual_directory(name, effective)
 
         # === steps (ONLY {{VAR}}) ===
         parsed_local_steps: List[Step] = []

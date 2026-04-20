@@ -15,11 +15,32 @@ def _prepare_nspawn_args(
     hostname: str = "fastcontainer",
     quiet: bool = True,
 ) -> List[str]:
-    """Prepare systemd-nspawn arguments with safe defaults.
+    """Prepare systemd-nspawn arguments with AUTOMATIC -D root injection.
 
-    Child profile flags (from extend/add) remain after parent flags.
+    The root directory is now always added by the runtime.
+    Users are forbidden from specifying it in the YAML.
     """
-    args = [arg.replace("{{ROOT}}", str(root)) for arg in template]
+    # Clean any stray manual directory flags (validation should have already caught these)
+    cleaned = []
+    i = 0
+    while i < len(template):
+        flag = str(template[i]).strip()
+        if flag == "-D":
+            i += 2  # skip -D + next value
+            continue
+        if flag.startswith(("--directory=", "-D=")) or flag == "--directory":
+            i += 1
+            continue
+        cleaned.append(template[i])
+        i += 1
+
+    # Always start with systemd-nspawn + the correct root
+    args = [cleaned[0] if cleaned else "systemd-nspawn"]
+    args += ["-D", str(root)]
+
+    # Add the rest of the user's flags
+    if len(cleaned) > 0:
+        args += cleaned[1:]
 
     # Safe defaults (never override user flags)
     if "--register=no" not in args:

@@ -23,8 +23,8 @@ def run_and_capture(
     """Run a command, capture output always.
 
     - verbose=True: live output (for -v mode)
-    - On failure: ALWAYS print the full step output (even without -v)
-      so the user sees exactly what went wrong.
+    - On failure: ALWAYS print a very clear, boxed failure banner
+      so the user immediately sees what went wrong.
     """
     process = subprocess.Popen(
         cmd,
@@ -46,11 +46,22 @@ def run_and_capture(
 
     if returncode != 0:
         if not verbose:
-            # Critical: show failing step output even in clean mode
-            sys.stdout.write("\n--- BUILD STEP FAILED ---\n")
-            sys.stdout.write(output)
-            sys.stdout.write("--- END OF FAILED STEP OUTPUT ---\n\n")
+            # === Much clearer failure banner (this is what you asked for) ===
+            sys.stdout.write("\n" + "═" * 80 + "\n")
+            sys.stdout.write(" " * 28 + "❌  BUILD STEP FAILED" + "\n")
+            sys.stdout.write("═" * 80 + "\n\n")
+
+            # Show the exact command that failed (super helpful now that -D is hidden)
+            sys.stdout.write(f"Failed command:\n  {' '.join(map(str, cmd))}\n\n")
+
+            sys.stdout.write("Step output:\n")
+            sys.stdout.write(output.rstrip() + "\n\n")
+
+            sys.stdout.write("═" * 80 + "\n")
+            sys.stdout.write(" " * 25 + "END OF FAILED STEP OUTPUT" + "\n")
+            sys.stdout.write("═" * 80 + "\n\n")
             sys.stdout.flush()
+
         raise subprocess.CalledProcessError(returncode, cmd, output)
 
     return output
