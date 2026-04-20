@@ -42,10 +42,30 @@ The goal is to feel closer to a super-powered `chroot + debootstrap + script` wo
 ### Quick Start
 
 ```bash
-sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-D KEY=VALUE]... [-- <command...>]
+sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-s] [-D KEY=VALUE]... [-- <command...>]
 
 sudo fastcontainer exec <containers_dir> <image-name> <command...> [-v]
 ```
+
+### Interactive Debug Shell on Failure (`-s` / `--shell-on-fail`) — **New in v0.6.0**
+
+When a `RUN:` step fails during the build, fastcontainer can **automatically drop you into an interactive bash shell** inside the exact temporary layer where the failure occurred.
+
+```bash
+sudo fastcontainer build ... -p myprofile -s
+# or long form
+sudo fastcontainer build ... --shell-on-fail
+```
+
+**What you get:**
+- The failure banner with full command + output (as before)
+- A full login shell (`bash -l`) with **exactly the same nspawn flags** as your profile (GPU devices, binds, tmpfs, environment, etc.)
+- The filesystem is in the precise state right after the failing command
+- You can inspect files, run commands, install packages, edit scripts, test fixes, etc.
+
+Type `exit` (or Ctrl+D) when you are done. The build will still fail afterwards and all temporary files will be cleaned up.
+
+This is one of the most powerful features for rapid iteration on complex builds.
 
 ### Variables (`-D`)
 
@@ -86,7 +106,7 @@ check: |
 - Any other `{{VAR}}` that is not passed via `-D` will cause an immediate clear build error.
 - Variables are expanded before fingerprint calculation, so caching remains reliable and reproducible.
 
-### Profiles & Inheritance (v0.5.0+)
+### Profiles & Inheritance (v0.6.0+)
 
 Profiles are the heart of fastcontainer. They support full inheritance:
 
@@ -183,6 +203,9 @@ sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
 
 # Verbose build
 sudo fastcontainer build ... -v
+
+# Build with debug shell on failure
+sudo fastcontainer build ... -p default -s
 ```
 
 **Final image name format:**  
@@ -190,6 +213,7 @@ sudo fastcontainer build ... -v
 
 ### Other features
 
+- `-s` / `--shell-on-fail`: drop into an interactive debug shell when a build step fails (v0.6.0)
 - `--prune`: delete all intermediate layers after a successful build.
 - Automatic build lock (`.fastcontainer.lock`) — prevents two builds from running at the same time in the same directory.
 - All temporary subvolumes are cleaned up on success or failure.

@@ -64,13 +64,18 @@ def execute(root: Path, command: str, nspawn_template: List[str], verbose: bool 
 
 
 def exec_in_container(
-    root: Path, command: List[str] | str | None, nspawn_template: List[str], verbose: bool = False
+    root: Path,
+    command: List[str] | str | None,
+    nspawn_template: List[str],
+    verbose: bool = False,
+    quiet: bool = True,
+    check: bool = True,
 ) -> None:
     """Run a command inside an existing container (post-build or `fastcontainer exec`)."""
     if command is None or (isinstance(command, (list, str)) and not command):
         return
 
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="fastcontainer-exec", quiet=True)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="fastcontainer-exec", quiet=quiet)
 
     if isinstance(command, str):
         strict_script = f"set -eo pipefail\n{command}"
@@ -79,7 +84,7 @@ def exec_in_container(
         full_cmd = args + command
 
     logger.debug("-> " + " ".join(map(str, full_cmd)))
-    subprocess.run(full_cmd, check=True)
+    subprocess.run(full_cmd, check=check)
 
 
 def check_in_container(

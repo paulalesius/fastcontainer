@@ -19,7 +19,7 @@ class Builder:
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
                  prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
                  post_build_cmd: List[str] | str | None = None,
-                 run_cmd: bool = True):
+                 run_cmd: bool = True, shell_on_fail: bool = False):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
@@ -28,6 +28,7 @@ class Builder:
         self.logger = logger or logging.getLogger("fastcontainer")
         self.post_build_cmd = post_build_cmd
         self.run_cmd = run_cmd
+        self.shell_on_fail = shell_on_fail
 
         self.final_name = (
             f"{spec.base.effective_name}-{profile.name}-{profile.fingerprint}"
@@ -127,6 +128,34 @@ class Builder:
 
             snapshot(temp_path, layer_path)
             return Layer(path=layer_path, hash=step_hash)
+
+        except Exception as e:  # CalledProcessError from a failing RUN step
+            if self.shell_on_fail and temp_path.is_dir():
+                self.logger.info("\n" + "═" * 80)
+                self.logger.info("💡 BUILD STEP FAILED — Dropping into interactive debug shell")
+                self.logger.info(f"   Temporary layer: {temp_path}")
+                self.logger.info("   You can inspect files, run commands, fix things, etc.")
+                self.logger.info("   Type 'exit' (or Ctrl+D) when done. Build will still fail afterwards.")
+                self.logger.info("═" * 80 + "\n")
+
+                # Use the existing helper (we'll update it next)
+                from .nspawn import exec_in_container
+                try:
+                    exec_in_container(
+                        root=temp_path,
+                        command="/bin/bash",          # interactive login shell
+                        nspawn_template=self.profile.nspawn,
+                        quiet=False,                  # no --quiet for debug shell
+                        check=False,                  # don't fail on normal shell exit
+                    )
+                except Exception as shell_err:
+                    self.logger.warning(f"Shell session had an error: {shell_err}")
+
+                self.logger.info("Shell exited — continuing with cleanup and build failure.")
+
+            # Re-raise so the outer build() handler and normal error flow still work
+            raise
+
         finally:
             if temp_path.is_dir():
                 delete(temp_path)
@@ -154,6 +183,7 @@ class Builder:
             logger=self.logger,
             post_build_cmd=None,
             run_cmd=False,
+            shell_on_fail=self.shell_on_fail,
         )
         parent_builder.build()
         self.logger.info(f"Parent '{parent_profile.name}' ready")

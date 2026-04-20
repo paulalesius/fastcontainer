@@ -54,8 +54,10 @@ def main() -> None:
 @click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build.")
 @click.option('-D', '--define', 'defines', multiple=True, metavar='KEY=VALUE',
               help='Define a variable KEY=VALUE for use inside add: flags (repeatable).')
+@click.option('-s', '--shell-on-fail', 'shell_on_fail', is_flag=True,
+              help="Drop into an interactive shell inside the failed container state if a build step fails.")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=False)
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, defines: tuple[str, ...] = (), command: tuple[str, ...] = ()) -> None:
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, defines: tuple[str, ...] = (), shell_on_fail: bool = False, command: tuple[str, ...] = ()) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn.
 
     Optional trailing command (after --) will be executed inside the final image.
@@ -103,6 +105,7 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
                 logger=logger,
                 post_build_cmd=post_cmd,
                 run_cmd=True,
+                shell_on_fail=shell_on_fail,
             )
             builder.build()
     except BlockingIOError:
