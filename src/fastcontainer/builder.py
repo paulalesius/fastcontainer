@@ -19,7 +19,7 @@ class Builder:
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
                  prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
                  post_build_cmd: List[str] | str | None = None,
-                 run_cmd: bool = True, shell_on_fail: bool = False):
+                 run_cmd: bool = True, shell: bool = False):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
@@ -28,7 +28,7 @@ class Builder:
         self.logger = logger or logging.getLogger("fastcontainer")
         self.post_build_cmd = post_build_cmd
         self.run_cmd = run_cmd
-        self.shell_on_fail = shell_on_fail
+        self.shell = shell
 
         self.final_name = (
             f"{spec.base.effective_name}-{profile.name}-{profile.fingerprint}"
@@ -46,6 +46,29 @@ class Builder:
             nspawn_template=self.profile.nspawn,
         )
         self.logger.info("Post-build command finished")
+
+    def _handle_success(self) -> None:
+        """Either run the normal post-build command OR drop into an interactive shell
+        (when -s/--shell was passed). Parent profiles never get the shell."""
+        if self.shell and self.run_cmd:
+            self.logger.info("\n" + "═" * 80)
+            self.logger.info("✅ BUILD SUCCESSFUL — Dropping into interactive shell")
+            self.logger.info(f"   Final container: {self.final_path}")
+            self.logger.info("   Type 'exit' (or Ctrl+D) when done.")
+            self.logger.info("═" * 80 + "\n")
+
+            try:
+                exec_in_container(
+                    root=self.final_path,
+                    command=["/bin/bash", "-l"],
+                    nspawn_template=self.profile.nspawn,
+                    quiet=False,                  # show shell output
+                    check=False,                  # normal shell exit is not an error
+                )
+            except Exception as shell_err:
+                self.logger.warning(f"Shell session had an error: {shell_err}")
+        else:
+            self._run_post_build(self._get_cmd_to_run())
 
     def _ensure_base_exists(self) -> None:
         """Create base subvolume from command if it doesn't exist."""
@@ -130,7 +153,7 @@ class Builder:
             return Layer(path=layer_path, hash=step_hash)
 
         except Exception as e:  # CalledProcessError from a failing RUN step
-            if self.shell_on_fail and temp_path.is_dir():
+            if self.shell and temp_path.is_dir():
                 self.logger.info("\n" + "═" * 80)
                 self.logger.info("💡 BUILD STEP FAILED — Dropping into interactive debug shell")
                 self.logger.info(f"   Temporary layer: {temp_path}")
@@ -138,15 +161,13 @@ class Builder:
                 self.logger.info("   Type 'exit' (or Ctrl+D) when done. Build will still fail afterwards.")
                 self.logger.info("═" * 80 + "\n")
 
-                # Use the existing helper (we'll update it next)
-                from .nspawn import exec_in_container
                 try:
                     exec_in_container(
                         root=temp_path,
                         command=["/bin/bash", "-l"],
                         nspawn_template=self.profile.nspawn,
-                        quiet=False,                  # no --quiet for debug shell
-                        check=False,                  # don't fail on normal shell exit
+                        quiet=False,
+                        check=False,
                     )
                 except Exception as shell_err:
                     self.logger.warning(f"Shell session had an error: {shell_err}")
@@ -183,7 +204,7 @@ class Builder:
             logger=self.logger,
             post_build_cmd=None,
             run_cmd=False,
-            shell_on_fail=self.shell_on_fail,
+            shell=self.shell,
         )
         parent_builder.build()
         self.logger.info(f"Parent '{parent_profile.name}' ready")
@@ -199,7 +220,7 @@ class Builder:
                     verbose=self.verbose,
                 ):
                     self.logger.info("Check passed - using cached image")
-                    self._run_post_build(self._get_cmd_to_run())
+                    self._handle_success()
                     return
                 else:
                     self.logger.warning("Check failed - deleting cache and forcing rebuild")
@@ -207,7 +228,7 @@ class Builder:
 
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
-                self._run_post_build(self._get_cmd_to_run())
+                self._handle_success()
                 return
 
         self.logger.info(f"Building profile: {self.profile.name}")
@@ -272,7 +293,7 @@ class Builder:
 
             self.logger.info(f"Successfully built: {self.final_name}")
 
-            self._run_post_build(self._get_cmd_to_run())
+            self._handle_success()
 
     def _prune_intermediates(self) -> None:
         self.logger.info("Pruning intermediate layers...")
