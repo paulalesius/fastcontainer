@@ -276,3 +276,4 @@ sudo fastcontainer build ... -p default -s
 # Regenerate the full source prompt for AI assistance
 bash scripts/project-to-prompt.sh
 ```
+
