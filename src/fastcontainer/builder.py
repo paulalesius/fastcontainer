@@ -143,7 +143,7 @@ class Builder:
                 try:
                     exec_in_container(
                         root=temp_path,
-                        command="/bin/bash",          # interactive login shell
+                        command=["/bin/bash", "-l"],
                         nspawn_template=self.profile.nspawn,
                         quiet=False,                  # no --quiet for debug shell
                         check=False,                  # don't fail on normal shell exit

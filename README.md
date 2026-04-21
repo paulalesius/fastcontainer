@@ -72,7 +72,7 @@ This is one of the most powerful features for rapid iteration on complex builds.
 fastcontainer supports variable substitution using the **`{{VAR}}`** syntax **everywhere** in the YAML file:
 
 - `add:` (nspawn flags)
-- `RUN:` steps
+- `RUN:` / `USE:` steps
 - `check:`
 - `cmd:`
 - `base.create:`
@@ -89,15 +89,10 @@ sudo fastcontainer build ... \
 ```yaml
 add:
   - "--bind={{HOST_CACHE}}:/root/.cache"
-  - "--bind={{HF_CACHE}}:/root/.cache/huggingface"
 
 steps:
   - RUN: |
       echo "Host cache is {{HOST_CACHE}}"
-      export PATH={{MY_PATH}}:$$PATH         # note: $$ escapes real shell $PATH
-
-check: |
-  test -d "{{HF_CACHE}}" || exit 1
 ```
 
 **Rules:**
@@ -125,18 +120,6 @@ profiles:
     steps:
       - RUN: |
           # CUDA-specific steps
-
-  run-llama-cpp:
-    extend: cuda
-    add:
-      - "--bind=/dev/nvidia0"
-      # ... more GPU binds
-    cmd: |
-      echo "=== Starting benchmark ==="
-      /llama.cpp/build/bin/llama-bench ...
-    check: |
-      # optional check that forces rebuild if it fails
-      test -f /llama.cpp/build/bin/llama-bench
 ```
 
 **Key rules:**
@@ -147,6 +130,74 @@ profiles:
 - `steps:` are additive (child steps run **after** parent steps).
 - `cmd:` and `check:` are **not** inherited — they only apply to the profile where they are defined.
 - Only the **final (leaf) profile** ever executes a `cmd:` (or the optional trailing CLI command).
+
+### Reusable Snippets (`snippets:` + `USE:`) — **New**
+
+Tired of repeating the same long `RUN:` blocks (CUDA install, `uv` setup, `git clone`, build commands, etc.) across profiles?  
+fastcontainer now lets you define **reusable command snippets** at the top level.
+
+```yaml
+# Top of your YAML file
+base:
+  name: ubuntu24.04-cu132-llama-cpp
+  create: |
+    debootstrap ...
+
+snippets:
+  apt-update-and-upgrade:
+    RUN: |
+      apt-get update
+      apt-get -y upgrade
+
+  install-build-deps:
+    RUN: |
+      apt install -y software-properties-common wget git ncurses-term libssl-dev cmake
+
+  install-cuda:
+    RUN: |
+      wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+      dpkg -i cuda-keyring_1.1-1_all.deb
+      apt-get update
+      apt-get -y install cuda-toolkit
+
+  clone-llama-cpp: |
+    git clone https://github.com/ggml-org/llama.cpp.git
+
+  build-llama-cpp:
+    RUN: |
+      . /etc/profile
+      export CUDA_HOME=/usr/local/cuda
+      cd llama.cpp
+      cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j $(nproc)
+```
+
+Then in any profile simply **reuse** them:
+
+```yaml
+profiles:
+  common:
+    steps:
+      - USE: apt-update-and-upgrade
+      - USE: install-build-deps
+
+  cuda:
+    extend: common
+    steps:
+      - USE: install-cuda
+
+  llama-cpp:
+    extend: cuda
+    steps:
+      - USE: clone-llama-cpp
+      - USE: build-llama-cpp
+```
+
+**Why this is great**
+- Dramatically cleaner YAML files (especially with CUDA / llama.cpp / Rust / uv setups).
+- Snippets are expanded exactly like normal `RUN:` steps.
+- Full support for inheritance (`extend:`), variables (`{{VAR}}`), and layer caching/fingerprinting.
+- You can still mix `RUN:` and `USE:` freely in the same profile.
+- Clear error message if you typo a snippet name.
 
 ### Base specification
 
@@ -195,7 +246,7 @@ sudo fastcontainer build ... -p run-llama-cpp -- /bin/bash -l
 sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default \
   -D HOST_CACHE=/home/noname/.cache
 
-# Full GPU + runtime variant
+# Full GPU + runtime variant (now using snippets)
 sudo fastcontainer build /disk/fastcontainer ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama-cpp
 
 # Run a one-off command instead of the profile's cmd:

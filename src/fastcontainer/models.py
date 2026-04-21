@@ -95,12 +95,15 @@ class NspawnProfile:
         resolved_profiles: Dict[str, "NspawnProfile"],
         base_nspawn: List[str] | None = None,
         variables: dict[str, str] | None = None,
+        snippets: Dict[str, str] | None = None,
     ) -> "NspawnProfile":
         """Resolve a profile with extend + add/remove for flags AND steps.
         ONLY {{VAR}} syntax is supported (as requested).
         """
         if variables is None:
             variables = {}
+        if snippets is None:
+            snippets = {}
 
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
@@ -149,7 +152,9 @@ class NspawnProfile:
         parsed_local_steps: List[Step] = []
         for i, s in enumerate(steps_raw, 1):
             parsed_local_steps.append(
-                Step.from_dict(s, i, variables=variables, profile_name=name)
+                Step.from_dict(
+                    s, i, variables=variables, profile_name=name, snippets=snippets
+                )
             )
 
         if extend_name:
@@ -279,16 +284,42 @@ class Step:
     @classmethod
     def from_dict(
         cls, data: Dict[str, Any], index: int,
-        variables: dict[str, str], profile_name: str
+        variables: dict[str, str], profile_name: str,
+        snippets: Dict[str, str] | None = None,   # NEW
     ) -> "Step":
-        if not isinstance(data, dict) or "RUN" not in data:
+        if snippets is None:
+            snippets = {}
+
+        if not isinstance(data, dict):
+            return cls(index=index, raw=data)
+
+        # ── NEW: USE: snippet_name ─────────────────────────────────────
+        if "USE" in data:
+            snippet_name = str(data["USE"]).strip()
+            if snippet_name not in snippets:
+                raise ValueError(
+                    f"Profile '{profile_name}': Snippet '{snippet_name}' not found "
+                    f"in top-level 'snippets:' section."
+                )
+            raw_cmd = snippets[snippet_name]
+            if not raw_cmd:
+                return cls(index=index, raw=data, cmd=None)
+
+            expanded = _expand_variables(
+                raw_cmd,
+                variables,
+                f"Snippet '{snippet_name}' (used in profile '{profile_name}')"
+            )
+            return cls(index=index, raw=data, cmd=expanded.strip())
+
+        # ── original RUN handling (unchanged) ─────────────────────────
+        if "RUN" not in data:
             return cls(index=index, raw=data)
 
         raw_cmd = data["RUN"]
         cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
 
         if cmd_str.strip():
-            # ONLY {{VAR}} — legacy $VAR is NOT expanded here
             expanded = _expand_variables(
                 cmd_str, variables, f"Profile '{profile_name}' RUN step {index}"
             )
@@ -391,10 +422,10 @@ class BuildSpec:
     yaml_path: Path
     yaml_hash: str
     profiles: Dict[str, NspawnProfile]
+    snippets: Dict[str, str] = field(default_factory=dict)   # NEW: name → raw command string
 
     @classmethod
     def from_yaml(cls, yaml_path: Path, variables: dict[str, str] | None = None) -> "BuildSpec":
-        """variables is the dict of -D KEY=VALUE passed from the CLI."""
         if variables is None:
             variables = {}
 
@@ -410,23 +441,30 @@ class BuildSpec:
 
         base = BaseSpec.from_data(base_raw, variables=variables)
 
+        # === NEW: Parse reusable snippets ===
+        snippets_raw = spec.get("snippets", {})
+        snippets: Dict[str, str] = {}
+        if not isinstance(snippets_raw, dict):
+            raise ValueError("snippets: must be a dictionary (name → command or {RUN: ...})")
+
+        for name, data in snippets_raw.items():
+            if isinstance(data, dict) and "RUN" in data:
+                cmd_raw = data["RUN"]
+            else:
+                cmd_raw = data
+            cmd_str = "\n".join(cmd_raw) if isinstance(cmd_raw, list) else str(cmd_raw)
+            snippets[name] = cmd_str.strip() if cmd_str.strip() else ""
+
         profiles_raw = spec.get("profiles")
         if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
             raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
 
-        # First collect all raw profile data (decouples from YAML key order)
-        profile_data: Dict[str, dict] = {}
-        for name, data in profiles_raw.items():
-            if not isinstance(data, dict):
-                raise ValueError(f"Profile '{name}' must be a dictionary")
-            profile_data[name] = data
+        profile_data: Dict[str, dict] = {name: data for name, data in profiles_raw.items()}
 
-        # Resolve profiles with dependency support (any order + cycle detection)
         resolved: Dict[str, NspawnProfile] = {}
         visiting: set[str] = set()
 
         def resolve_profile(name: str) -> NspawnProfile:
-            """Recursively resolve a profile and its parents (DFS with cycle detection)."""
             if name in resolved:
                 return resolved[name]
             if name not in profile_data:
@@ -442,20 +480,20 @@ class BuildSpec:
             if extend_name:
                 if extend_name == name:
                     raise ValueError(f"Profile '{name}' cannot extend itself")
-                # Ensure parent is resolved first
                 resolve_profile(extend_name)
 
-            # Now safe to instantiate (parent is guaranteed resolved)
             profile = NspawnProfile.from_dict(
-                name, data, resolved,
+                name=name,
+                data=data,
+                resolved_profiles=resolved,
                 base_nspawn=base.nspawn_add,
                 variables=variables,
+                snippets=snippets,          # ← NEW
             )
             resolved[name] = profile
             visiting.remove(name)
             return profile
 
-        # Resolve every profile (triggers recursive parent resolution as needed)
         for name in list(profile_data.keys()):
             resolve_profile(name)
 
@@ -466,4 +504,5 @@ class BuildSpec:
             yaml_path=yaml_path,
             yaml_hash=yaml_hash,
             profiles=resolved,
+            snippets=snippets,
         )
