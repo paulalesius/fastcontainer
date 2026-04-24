@@ -44,37 +44,29 @@ def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
                 f"fastcontainer now injects the correct directory flag automatically."
             )
 
-def _validate_no_manual_root_flags(profile_name: str, flags: List[str]) -> None:
-    """Raise a clear build error if the user manually specifies the root directory flag.
-
-    Allowed only: the exact pattern '-D' immediately followed by '{{ROOT}}'.
-    Everything else is forbidden (including --directory=, -D=something, -D /hardcoded/path, etc.).
-    """
-    i = 0
-    while i < len(flags):
-        flag = str(flags[i]).strip()
-
-        if flag == "-D":
-            # Must be followed by exactly "{{ROOT}}"
-            if i + 1 >= len(flags) or str(flags[i + 1]).strip() != "{{ROOT}}":
-                raise ValueError(
-                    f"Profile '{profile_name}': '-D' can ONLY be used as:\n"
-                    f"    - '-D'\n"
-                    f"    - '{{{{ROOT}}}}'\n\n"
-                    f"You are not allowed to specify the container root path yourself.\n"
-                    f"fastcontainer manages -D {{ROOT}} automatically."
-                )
-            i += 2
-            continue
-
-        if flag.startswith(("--directory", "-D=")):
+def _forbid_manual_user(profile_name: str, flags: List[str]) -> None:
+    """Completely forbid --user / -u in add: (fastcontainer now controls it per RUN/USE)."""
+    for item in flags:
+        flag = str(item).strip()
+        if flag in ("--user", "-u") or flag.startswith(("--user=", "-u=")):
             raise ValueError(
-                f"Profile '{profile_name}': '--directory' / '-D=' flags are forbidden.\n"
-                f"Use the built-in '{{{{ROOT}}}}' placeholder instead.\n"
-                f"fastcontainer is the only component allowed to set the container root."
+                f"Profile '{profile_name}': Do NOT specify --user or -u in 'add:'.\n"
+                f"Use the new per-step syntax instead:\n"
+                f"    - RUN(username): | ...\n"
+                f"    - USE(username): snippet-name"
             )
 
-        i += 1
+
+def _parse_step_key(key: str) -> tuple[str, str | None]:
+    """Parse 'RUN', 'RUN(root)', 'USE(noname)', 'RUN({{USER}})', etc."""
+    import re
+    # Matches: RUN, RUN(root), RUN({{VAR}}), USE(noname), etc.
+    match = re.match(r'^(RUN|USE)\s*(?:\(([^)]+)\))?$', key.strip())
+    if not match:
+        return key.strip(), None
+    cmd_type = match.group(1)
+    user = match.group(2).strip() if match.group(2) else None
+    return cmd_type, user
 
 @dataclass(frozen=True)
 class NspawnProfile:
@@ -82,9 +74,10 @@ class NspawnProfile:
     name: str
     nspawn: List[str]           # full resolved list
     cmd: List[str] | str | None = None
-    steps: List[Step] = field(default_factory=list)  # full effective (for manifest/logs)
-    parent: str | None = None                    # NEW
-    local_steps: List[Step] = field(default_factory=list)  # NEW - only the delta steps
+    cmd_user: str = "root"      # NEW: user for the final cmd:
+    steps: List[Step] = field(default_factory=list)
+    parent: str | None = None
+    local_steps: List[Step] = field(default_factory=list)
     check: str | None = None
 
     @classmethod
@@ -139,13 +132,16 @@ class NspawnProfile:
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
 
+        # forbid --user
+        _forbid_manual_user(name, effective)
+
         # === Expand ONLY {{VAR}} in add: flags ===
         effective = [
             _expand_variables(str(flag), variables, f"Profile '{name}' add:")
             for flag in effective
         ]
 
-        # NEW: forbid any manual directory specification
+        # forbid any manual directory specification
         _forbid_manual_directory(name, effective)
 
         # === steps (ONLY {{VAR}}) ===
@@ -169,22 +165,41 @@ class NspawnProfile:
             local_steps = parsed_local_steps
             parent_name = None
 
-        # === cmd: (ONLY {{VAR}}) ===
+        # === cmd: (support cmd(root): |  or plain cmd: → root) ===
         cmd: List[str] | str | None = None
+        cmd_user: str = "root"
+
         if cmd_raw is not None:
-            if isinstance(cmd_raw, str):
-                cmd_str = cmd_raw.strip()
+            # Parse possible cmd(user):
+            if isinstance(cmd_raw, dict) and len(cmd_raw) == 1:
+                raw_key = next(iter(cmd_raw.keys()))
+                cmd_type, user_raw = _parse_step_key(raw_key)
+                if cmd_type == "cmd":
+                    value = cmd_raw[raw_key]
+                    if user_raw:
+                        cmd_user = _expand_variables(
+                            user_raw, variables, f"Profile '{name}' cmd: user"
+                        ).strip()
+                        if not cmd_user:
+                            cmd_user = "root"
+                else:
+                    value = cmd_raw  # fallback
+            else:
+                value = cmd_raw
+
+            if isinstance(value, str):
+                cmd_str = value.strip()
                 if cmd_str:
                     cmd_str = _expand_variables(cmd_str, variables, f"Profile '{name}' cmd:")
                     cmd = cmd_str
-            elif isinstance(cmd_raw, list):
+            elif isinstance(value, list):
                 cmd_list = [
                     _expand_variables(str(x).strip(), variables, f"Profile '{name}' cmd:")
-                    for x in cmd_raw if str(x).strip()
+                    for x in value if str(x).strip()
                 ]
                 cmd = cmd_list if cmd_list else None
             else:
-                raise ValueError(f"Profile '{name}' cmd: must be a string or list")
+                raise ValueError(f"Profile '{name}' cmd: must be a string or list (or cmd(user): form)")
 
         # === check: (ONLY {{VAR}}) ===
         check: str | None = None
@@ -200,6 +215,7 @@ class NspawnProfile:
             name=name,
             nspawn=effective,
             cmd=cmd,
+            cmd_user=cmd_user,
             steps=effective_steps,
             parent=parent_name,
             local_steps=local_steps,
@@ -213,6 +229,9 @@ class NspawnProfile:
         # All resolved steps in order
         for step in self.steps:
             parts.append(step.cmd or "")
+            parts.append(step.user)
+
+        parts.append(str(self.cmd_user))
         # Final resolved nspawn flags (order matters for nspawn)
         parts.append("\n".join(self.nspawn))
         # check: is now part of the image identity
@@ -277,25 +296,52 @@ class BaseSpec:
 
 @dataclass(frozen=True)
 class Step:
+    """A single build step (RUN or USE). Now supports per-step user."""
     index: int
     raw: Dict[str, Any]
     cmd: str | None = None
+    user: str = "root"          # NEW: user that this step runs as
 
     @classmethod
     def from_dict(
         cls, data: Dict[str, Any], index: int,
         variables: dict[str, str], profile_name: str,
-        snippets: Dict[str, str] | None = None,   # NEW
+        snippets: Dict[str, str] | None = None,
     ) -> "Step":
         if snippets is None:
             snippets = {}
 
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or len(data) != 1:
+            # Fallback for malformed steps
             return cls(index=index, raw=data)
 
-        # ── NEW: USE: snippet_name ─────────────────────────────────────
-        if "USE" in data:
-            snippet_name = str(data["USE"]).strip()
+        raw_key = next(iter(data.keys()))
+        cmd_type, user_raw = _parse_step_key(raw_key)
+        value = data[raw_key]
+
+        # Resolve user (supports {{VAR}})
+        user: str = "root"
+        if user_raw:
+            user = _expand_variables(
+                user_raw, variables, f"Profile '{profile_name}' step {index} user"
+            ).strip()
+            if not user:
+                user = "root"
+
+        if cmd_type == "RUN":
+            # ── original RUN handling ─────────────────────────
+            raw_cmd = value
+            cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
+            if cmd_str.strip():
+                expanded = _expand_variables(
+                    cmd_str, variables, f"Profile '{profile_name}' RUN step {index}"
+                )
+                return cls(index=index, raw=data, cmd=expanded.strip(), user=user)
+            return cls(index=index, raw=data, cmd=None, user=user)
+
+        elif cmd_type == "USE":
+            # ── USE: snippet handling ─────────────────────────
+            snippet_name = str(value).strip()
             if snippet_name not in snippets:
                 raise ValueError(
                     f"Profile '{profile_name}': Snippet '{snippet_name}' not found "
@@ -303,29 +349,17 @@ class Step:
                 )
             raw_cmd = snippets[snippet_name]
             if not raw_cmd:
-                return cls(index=index, raw=data, cmd=None)
+                return cls(index=index, raw=data, cmd=None, user=user)
 
             expanded = _expand_variables(
                 raw_cmd,
                 variables,
                 f"Snippet '{snippet_name}' (used in profile '{profile_name}')"
             )
-            return cls(index=index, raw=data, cmd=expanded.strip())
+            return cls(index=index, raw=data, cmd=expanded.strip(), user=user)
 
-        # ── original RUN handling (unchanged) ─────────────────────────
-        if "RUN" not in data:
-            return cls(index=index, raw=data)
-
-        raw_cmd = data["RUN"]
-        cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
-
-        if cmd_str.strip():
-            expanded = _expand_variables(
-                cmd_str, variables, f"Profile '{profile_name}' RUN step {index}"
-            )
-            return cls(index=index, raw=data, cmd=expanded.strip())
-
-        return cls(index=index, raw=data, cmd=None)
+        # Fallback
+        return cls(index=index, raw=data, user=user)
 
 @dataclass(frozen=True)
 class Layer:

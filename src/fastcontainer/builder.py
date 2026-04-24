@@ -30,6 +30,8 @@ class Builder:
         self.run_cmd = run_cmd
         self.shell = shell
 
+        self.cmd_user = getattr(profile, 'cmd_user', 'root')
+
         self.final_name = (
             f"{spec.base.effective_name}-{profile.name}-{profile.fingerprint}"
         )
@@ -44,6 +46,7 @@ class Builder:
             root=self.final_path,
             command=cmd,
             nspawn_template=self.profile.nspawn,
+            user=self.cmd_user,
         )
         self.logger.info("Post-build command finished")
 
@@ -62,8 +65,9 @@ class Builder:
                     root=self.final_path,
                     command=["/bin/bash", "-l"],
                     nspawn_template=self.profile.nspawn,
-                    quiet=False,                  # show shell output
-                    check=False,                  # normal shell exit is not an error
+                    quiet=False,
+                    check=False,
+                    user=self.cmd_user,
                 )
             except Exception as shell_err:
                 self.logger.warning(f"Shell session had an error: {shell_err}")
@@ -130,7 +134,7 @@ class Builder:
         try:
             snapshot(previous.path, temp_path)
 
-            output = execute(temp_path, step.cmd, self.profile.nspawn, verbose=self.verbose)
+            output = execute(temp_path, step.cmd, self.profile.nspawn, user=step.user, verbose=self.verbose)
 
             current_logs[f"{step.index:03d}"] = {
                 "command": step.cmd,
@@ -168,6 +172,7 @@ class Builder:
                         nspawn_template=self.profile.nspawn,
                         quiet=False,
                         check=False,
+                        user=step.user, # Run debug shell as the user of the failing build step
                     )
                 except Exception as shell_err:
                     self.logger.warning(f"Shell session had an error: {shell_err}")
@@ -206,6 +211,7 @@ class Builder:
             run_cmd=False,
             shell=self.shell,
         )
+        # no cmd_user needed for parents (we only care about it in leaf profiles)
         parent_builder.build()
         self.logger.info(f"Parent '{parent_profile.name}' ready")
 

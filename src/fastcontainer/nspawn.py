@@ -8,25 +8,21 @@ from .utils import run_and_capture
 
 logger = logging.getLogger("fastcontainer")
 
-
 def _prepare_nspawn_args(
     root: Path,
     template: List[str],
     hostname: str = "fastcontainer",
     quiet: bool = True,
+    user: str = "root",          # NEW
 ) -> List[str]:
-    """Prepare systemd-nspawn arguments with AUTOMATIC -D root injection.
-
-    The root directory is now always added by the runtime.
-    Users are forbidden from specifying it in the YAML.
-    """
-    # Clean any stray manual directory flags (validation should have already caught these)
+    """Prepare systemd-nspawn arguments with AUTOMATIC -D root + --user injection."""
+    # Clean any stray manual directory flags
     cleaned = []
     i = 0
     while i < len(template):
         flag = str(template[i]).strip()
         if flag == "-D":
-            i += 2  # skip -D + next value
+            i += 2
             continue
         if flag.startswith(("--directory=", "-D=")) or flag == "--directory":
             i += 1
@@ -34,15 +30,21 @@ def _prepare_nspawn_args(
         cleaned.append(template[i])
         i += 1
 
-    # Always start with systemd-nspawn + the correct root
+    # Always start with systemd-nspawn + root
     args = [cleaned[0] if cleaned else "systemd-nspawn"]
     args += ["-D", str(root)]
+
+    # NEW: inject --user for this step
+    if user and user != "root":
+        args += [f"--user={user}"]
+    else:
+        args += ["--user=root"]   # explicit default
 
     # Add the rest of the user's flags
     if len(cleaned) > 0:
         args += cleaned[1:]
 
-    # Safe defaults (never override user flags)
+    # Safe defaults
     if "--register=no" not in args:
         args.append("--register=no")
     if not any(a.startswith("--hostname=") for a in args):
@@ -52,16 +54,14 @@ def _prepare_nspawn_args(
 
     return args
 
-
-def execute(root: Path, command: str, nspawn_template: List[str], verbose: bool = False) -> str:
-    """Execute a command inside the container during build (output captured)."""
+def execute(root: Path, command: str, nspawn_template: List[str], user: str = "root", verbose: bool = False) -> str:
+    """Execute a command inside the container during build (now respects per-step user)."""
     strict_script = f"set -eo pipefail\n{command}"
 
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="build", quiet=True)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="build", quiet=True, user=user)
     args += ["/bin/bash", "-l", "-c", strict_script]
 
     return run_and_capture(args, verbose=verbose)
-
 
 def exec_in_container(
     root: Path,
@@ -70,12 +70,13 @@ def exec_in_container(
     verbose: bool = False,
     quiet: bool = True,
     check: bool = True,
+    user: str = "root",          # NEW
 ) -> None:
     """Run a command inside an existing container (post-build or `fastcontainer exec`)."""
     if command is None or (isinstance(command, (list, str)) and not command):
         return
 
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="fastcontainer-exec", quiet=quiet)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="fastcontainer-exec", quiet=quiet, user=user)
 
     if isinstance(command, str):
         strict_script = f"set -eo pipefail\n{command}"
@@ -85,7 +86,6 @@ def exec_in_container(
 
     logger.debug("-> " + " ".join(map(str, full_cmd)))
     subprocess.run(full_cmd, check=check)
-
 
 def check_in_container(
     root: Path, command: str | None, nspawn_template: List[str], verbose: bool = False
