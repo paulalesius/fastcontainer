@@ -116,7 +116,7 @@ class Builder:
         if not step.cmd:
             return previous
 
-        # Better human-readable preview for long/multi-line steps
+        # === Improved preview for long/multi-line steps ===
         def _preview(step: Step) -> str:
             if not step.cmd:
                 return "no-op"
@@ -126,7 +126,8 @@ class Builder:
 
             preview = lines[0]
             user_part = f" ({step.user})" if step.user != "root" else ""
-            step_type = "RUN" if "RUN" in str(step.raw) else "USE"  # rough but good enough
+            # Determine step type from the raw key (more reliable)
+            step_type = "RUN" if any(k.startswith("RUN") for k in step.raw) else "USE"
 
             if len(lines) > 1 or len(preview) > 75:
                 preview = preview[:72] + "..."
@@ -141,13 +142,13 @@ class Builder:
         step_hash = hashlib.sha1(content).hexdigest()
         layer_path = self._layer_path(step_hash)
 
-        preview = (step.cmd or "-").splitlines()[0]
+        nice_preview = _preview(step)
 
         if layer_path.is_dir():
-            self.logger.info(f"Step {step.index}/{total_steps} (cached) {_preview(step)}")
+            self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
             return Layer(path=layer_path, hash=step_hash)
 
-        self.logger.info(f"Step {step.index}/{total_steps}: {preview}")
+        self.logger.info(f"Step {step.index}/{total_steps} {nice_preview}")
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
