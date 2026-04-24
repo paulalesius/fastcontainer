@@ -41,7 +41,7 @@ class Builder:
         """Run post-build command (always shows output)."""
         if not cmd:
             return
-        self.logger.info("Running post-build command")
+        self.logger.info(f"Running profile command (cmd({self.cmd_user}))")
         exec_in_container(
             root=self.final_path,
             command=cmd,
@@ -116,6 +116,22 @@ class Builder:
         if not step.cmd:
             return previous
 
+        # Better human-readable preview for long/multi-line steps
+        def _preview(step: Step) -> str:
+            if not step.cmd:
+                return "no-op"
+            lines = [line.strip() for line in step.cmd.strip().splitlines() if line.strip()]
+            if not lines:
+                return "no-op"
+
+            preview = lines[0]
+            user_part = f" ({step.user})" if step.user != "root" else ""
+            step_type = "RUN" if "RUN" in str(step.raw) else "USE"  # rough but good enough
+
+            if len(lines) > 1 or len(preview) > 75:
+                preview = preview[:72] + "..."
+            return f"{step_type}{user_part}: {preview}"
+
         nspawn_context = "\n".join(self.profile.nspawn)
         content = (
             previous.hash.encode()
@@ -128,7 +144,7 @@ class Builder:
         preview = (step.cmd or "-").splitlines()[0]
 
         if layer_path.is_dir():
-            self.logger.info(f"Step {step.index}/{total_steps} (cached): {preview}")
+            self.logger.info(f"Step {step.index}/{total_steps} (cached) {_preview(step)}")
             return Layer(path=layer_path, hash=step_hash)
 
         self.logger.info(f"Step {step.index}/{total_steps}: {preview}")
