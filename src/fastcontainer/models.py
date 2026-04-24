@@ -101,7 +101,6 @@ class NspawnProfile:
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
         remove_raw = data.get("remove", data.get("del", []))
-        cmd_raw = data.get("cmd")
         steps_raw = data.get("steps", [])
         check_raw = data.get("check")
 
@@ -165,32 +164,40 @@ class NspawnProfile:
             local_steps = parsed_local_steps
             parent_name = None
 
-        # === cmd: (support cmd(root): |  or plain cmd: → root) ===
+        # === cmd: support both "cmd:" and "cmd(user):" (like RUN(user)) ===
         cmd: List[str] | str | None = None
         cmd_user: str = "root"
 
-        if cmd_raw is not None:
-            # Parse possible cmd(user):
-            if isinstance(cmd_raw, dict) and len(cmd_raw) == 1:
-                raw_key = next(iter(cmd_raw.keys()))
-                cmd_type, user_raw = _parse_step_key(raw_key)
-                if cmd_type == "cmd":
-                    value = cmd_raw[raw_key]
-                    if user_raw:
-                        cmd_user = _expand_variables(
-                            user_raw, variables, f"Profile '{name}' cmd: user"
-                        ).strip()
-                        if not cmd_user:
-                            cmd_user = "root"
-                else:
-                    value = cmd_raw  # fallback
-            else:
-                value = cmd_raw
+        # Look for either a plain "cmd" key OR a "cmd(user)" key
+        cmd_key = None
+        cmd_value = None
+        for k, v in list(data.items()):
+            k_str = str(k).strip()
+            if k_str == "cmd" or (k_str.startswith("cmd(") and k_str.endswith(")")):
+                cmd_key = k_str
+                cmd_value = v
+                # Remove it from data so it doesn't leak into other processing
+                data.pop(k, None)
+                break
 
+        if cmd_key is not None:
+            # Extract user if it's cmd(someuser):
+            if cmd_key != "cmd":
+                match = re.search(r'cmd\(([^)]+)\)', cmd_key)
+                if match:
+                    user_raw = match.group(1).strip()
+                    cmd_user = _expand_variables(
+                        user_raw, variables, f"Profile '{name}' cmd: user"
+                    ).strip() or "root"
+
+            # Now process the value (string or list) exactly like before
+            value = cmd_value
             if isinstance(value, str):
                 cmd_str = value.strip()
                 if cmd_str:
-                    cmd_str = _expand_variables(cmd_str, variables, f"Profile '{name}' cmd:")
+                    cmd_str = _expand_variables(
+                        cmd_str, variables, f"Profile '{name}' cmd:"
+                    )
                     cmd = cmd_str
             elif isinstance(value, list):
                 cmd_list = [
@@ -199,7 +206,10 @@ class NspawnProfile:
                 ]
                 cmd = cmd_list if cmd_list else None
             else:
-                raise ValueError(f"Profile '{name}' cmd: must be a string or list (or cmd(user): form)")
+                raise ValueError(
+                    f"Profile '{name}' cmd: must be a string or list "
+                    f"(or cmd(user): form)"
+                )
 
         # === check: (ONLY {{VAR}}) ===
         check: str | None = None

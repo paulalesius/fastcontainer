@@ -7,10 +7,8 @@ base:
 profiles:
   default:
     add:
-      - "-D"
-      - "{{ROOT}}"
       - "--tmpfs=/var/tmp"
-      - "--bind=${HOST_CACHE}:/root/.cache"   # ← demonstrates the new -D variable feature
+      - "--bind={{HOST_CACHE}}:/root/.cache"   # ← demonstrates the new -D variable feature
       - "--private-users=no"
       - "--resolv-conf=replace-stub"
       - "--timezone=off"

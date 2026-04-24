@@ -53,6 +53,11 @@ class Builder:
     def _handle_success(self) -> None:
         """Either run the normal post-build command OR drop into an interactive shell
         (when -s/--shell was passed). Parent profiles never get the shell."""
+        cmd_to_run = self._get_cmd_to_run()
+        if cmd_to_run:
+            self.logger.info(
+                f"→ Running profile command (as {self.cmd_user})"
+            )
         if self.shell and self.run_cmd:
             self.logger.info("\n" + "═" * 80)
             self.logger.info("✅ BUILD SUCCESSFUL — Dropping into interactive shell")
