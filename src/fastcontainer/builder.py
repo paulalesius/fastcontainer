@@ -41,12 +41,14 @@ class Builder:
         """Run post-build command (always shows output)."""
         if not cmd:
             return
+        # Post-build cmd: always ephemeral (changes are thrown away)
         self.logger.info(f"Running profile command (cmd({self.cmd_user}))")
         exec_in_container(
             root=self.final_path,
             command=cmd,
             nspawn_template=self.profile.nspawn,
             user=self.cmd_user,
+            ephemeral=True,
         )
         self.logger.info("Post-build command finished")
 

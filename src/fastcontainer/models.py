@@ -241,7 +241,6 @@ class NspawnProfile:
             parts.append(step.cmd or "")
             parts.append(step.user)
 
-        parts.append(str(self.cmd_user))
         # Final resolved nspawn flags (order matters for nspawn)
         parts.append("\n".join(self.nspawn))
         # check: is now part of the image identity

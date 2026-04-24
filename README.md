@@ -119,7 +119,11 @@ cmd(noname): |          # runs as the specified user
   /llama.cpp/build/bin/llama-bench ...
 ```
 
-You can also override it from the CLI (the trailing command always runs as the `cmd_user` defined in the profile).
+**Important:** The `cmd:` (and any trailing command you pass on the CLI) now runs in an **ephemeral** container (`systemd-nspawn --ephemeral`).  
+Any files created or modified during this command are **discarded** after it finishes. The final cached image is never changed by the post-build command.
+
+This is by design: `cmd:` is only for one-off actions (benchmarks, tests, printing info, etc.). Use a `RUN:` step if you need persistent changes.
+
 
 ### Examples
 

@@ -13,7 +13,8 @@ def _prepare_nspawn_args(
     template: List[str],
     hostname: str = "fastcontainer",
     quiet: bool = True,
-    user: str = "root",          # NEW
+    user: str = "root",
+    ephemeral: bool = False,
 ) -> List[str]:
     """Prepare systemd-nspawn arguments with AUTOMATIC -D root + --user injection."""
     # Clean any stray manual directory flags
@@ -33,6 +34,9 @@ def _prepare_nspawn_args(
     # Always start with systemd-nspawn + root
     args = [cleaned[0] if cleaned else "systemd-nspawn"]
     args += ["-D", str(root)]
+
+    if ephemeral:
+        args.append("--ephemeral")
 
     # NEW: inject --user for this step
     if user and user != "root":
@@ -58,7 +62,7 @@ def execute(root: Path, command: str, nspawn_template: List[str], user: str = "r
     """Execute a command inside the container during build (now respects per-step user)."""
     strict_script = f"set -eo pipefail\n{command}"
 
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="build", quiet=True, user=user)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="build", quiet=True, user=user, ephemeral=False)
     args += ["/bin/bash", "-l", "-c", strict_script]
 
     return run_and_capture(args, verbose=verbose)
@@ -70,7 +74,8 @@ def exec_in_container(
     verbose: bool = False,
     quiet: bool = True,
     check: bool = True,
-    user: str = "root",          # NEW
+    user: str = "root",
+    ephemeral: bool = False,
 ) -> None:
     """Run a command inside an existing container (post-build or `fastcontainer exec`)."""
     if command is None or (isinstance(command, (list, str)) and not command):
@@ -99,7 +104,7 @@ def check_in_container(
     strict_script = f"set -eo pipefail\n{command}"
 
     # Check deliberately does NOT use --quiet so failure output is visible
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="check", quiet=False)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="check", quiet=False, ephemeral=False)
     args += ["/bin/bash", "-l", "-c", strict_script]
 
     try:
