@@ -18,7 +18,9 @@ uv sync --force-reinstall
 
 ### Design Philosophy — Built for R&D, not production hardening
 
-*(unchanged — same as your current README)*
+fastcontainer is intentionally minimal. It gives you fast, reproducible, layered containers using only btrfs snapshots and `systemd-nspawn`. No Dockerfiles, no OCI images, no daemon, no registry — just plain directories on a btrfs filesystem that you can inspect, modify, or delete with normal tools.
+
+Perfect for machine-learning research, GPU-heavy experiments, and any workflow where you want full control and instant rebuilds of intermediate layers.
 
 ### Quick Start
 
@@ -69,15 +71,24 @@ cmd: |
 - The interactive shell (`-s`) on success runs as the `cmd(user)` you defined.
 - User changes are part of the cache fingerprint — changing the user forces a rebuild of that layer.
 
-### Interactive Shell (`-s` / `--shell`) — **New in v0.7.0**
+### Interactive Shell (`-s` / `--shell`) — New in v0.7.0
 
-*(your existing section — unchanged)*
+Pass `-s` (or `--shell`) to drop into an interactive shell:
+
+- On **build failure** → shell opens inside the temporary failing layer (you can debug/fix things).
+- On **successful build** → shell opens inside the final image instead of running `cmd:`.
+
+The shell always respects the user defined for that step/profile.
 
 ### Variables (`-D`)
 
-*(your existing section — unchanged, it already mentions that variables work in RUN/USE/cmd)*
+```bash
+sudo fastcontainer build ... -D HOST_CACHE=/home/noname/.cache -D MYUSER=noname
+```
 
-### Profiles & Inheritance (v0.6.0+)
+Use `{{VAR}}` inside `add:`, `RUN:`, `cmd:`, `create:`, etc. Only `{{VAR}}` syntax is supported (no `${VAR}` or `$VAR`).
+
+### Profiles & Inheritance
 
 ```yaml
 profiles:
@@ -85,23 +96,78 @@ profiles:
     add:
       - "--tmpfs=/var/tmp"
       - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"
     steps:
       - RUN: |
           apt-get update && apt-get install -y ...
+
+  cuda:
+    extend: common          # inherits add: + steps: from common
+    steps:
+      - RUN: |
+          # CUDA-specific steps here
 ```
 
-*(rest of the section unchanged)*
+### Base Import (`import-base:`) — **New in v0.9.0**
+
+Extract common bases, snippets, and profiles into reusable library files.
+
+**Library file** (`common-ubuntu-base.yaml`):
+```yaml
+base:
+  name: ubuntu-noble-minimal
+  create: |
+    debootstrap --variant=minbase noble . http://archive.ubuntu.com/ubuntu/
+
+profiles:
+  common:
+    add:
+      - "--tmpfs=/var/tmp"
+      - "--private-users=no"
+      - "--resolv-conf=replace-stub"
+      - "--timezone=off"
+    steps:
+      - RUN: |
+          apt-get update
+          apt install -y software-properties-common wget git ...
+```
+
+**Project file** (now tiny):
+```yaml
+import-base: common-ubuntu-base.yaml   # ← brings base + snippets + profiles
+
+profiles:
+  cuda:
+    extend: common                     # works even if 'common' came from the library
+    steps:
+      - RUN: |
+          # your CUDA-specific steps...
+
+  run-llama-cpp:
+    extend: cuda
+    # your project-specific add: and cmd: ...
+```
+
+**Rules:**
+- Use **either** `base:` **or** `import-base:`, never both (clear error if both are present).
+- The imported file **must** contain a `base:` section.
+- Local `profiles:` and `snippets:` **completely override** anything with the same name from the library.
+- `extend:` works transparently whether the parent profile is local or imported.
+- Paths are resolved relative to the importing YAML file.
+- Only **one** import per file.
+
+This makes large projects dramatically shorter while keeping all the shared knowledge (Ubuntu base, CUDA setup, GPU binds, etc.) in one maintainable place.
 
 ### Reusable Snippets (`snippets:` + `USE:`)
-
-**New syntax:** `USE(user): snippet-name`
 
 ```yaml
 snippets:
   build-llama:
     RUN: |
-      git clone ...
-      cmake ...
+      git clone https://github.com/ggml-org/llama.cpp.git
+      cd llama.cpp
+      cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j $(nproc)
 
 profiles:
   llama-cpp:
@@ -111,19 +177,21 @@ profiles:
 
 ### Post-build command (`cmd:`)
 
-You can define a default command that runs automatically after a successful build:
+Define a default command that runs automatically after a successful build:
 
 ```yaml
-cmd(noname): |          # runs as the specified user
+cmd(noname): |
   echo "=== Starting llama-bench as $(whoami) ==="
   /llama.cpp/build/bin/llama-bench ...
 ```
 
-**Important:** The `cmd:` (and any trailing command you pass on the CLI) now runs in an **ephemeral** container (`systemd-nspawn --ephemeral`).  
-Any files created or modified during this command are **discarded** after it finishes. The final cached image is never changed by the post-build command.
+You can also pass a trailing command on the CLI:
 
-This is by design: `cmd:` is only for one-off actions (benchmarks, tests, printing info, etc.). Use a `RUN:` step if you need persistent changes.
+```bash
+sudo fastcontainer build ... -p myprofile -- echo "one-off command"
+```
 
+**Important:** The `cmd:` (and any trailing command) runs in an **ephemeral** container (`--ephemeral`). Any changes made are discarded after it finishes. The final cached image is never modified.
 
 ### Examples
 
@@ -132,7 +200,7 @@ This is by design: `cmd:` is only for one-off actions (benchmarks, tests, printi
 sudo fastcontainer build /disk/fastcontainer ./sample/sample.yaml -p default \
   -D HOST_CACHE=/home/noname/.cache
 
-# Full GPU + runtime variant
+# Full GPU + runtime variant (using import-base)
 sudo fastcontainer build /disk/fastcontainer ./sample/ubuntu24.04-cu132-llama-cpp.yaml -p run-llama-cpp
 
 # Build and immediately drop into a shell (success or failure)
@@ -148,10 +216,12 @@ sudo fastcontainer build ... -v
 ### Other features
 
 - Per-step users (`RUN(user):`, `USE(user):`, `cmd(user):`) — v0.8.0
-- `-s` / `--shell`: interactive shell on failure **or** success (v0.7.0)
-- `--prune`: delete all intermediate layers after a successful build.
+- Base library import via `import-base:` — v0.9.0
+- `-s` / `--shell`: interactive shell on failure **or** success — v0.7.0
+- `--prune`: delete all intermediate layers after a successful build
 - Automatic build lock (`.fastcontainer.lock`)
-- Every layer contains a `fastcontainer.json` manifest with full build history.
+- Every layer contains a `fastcontainer.json` manifest with full build history
+- Reusable `snippets:` + `USE:` syntax
 
 ### Contributing & Development
 
@@ -160,3 +230,7 @@ sudo fastcontainer build ... -v
 bash scripts/project-to-prompt.sh
 ```
 
+---
+
+**Happy container building!**  
+If you have questions or ideas for the next feature, open an issue or just ping me.

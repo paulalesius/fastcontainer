@@ -26,6 +26,16 @@ def _expand_variables(text: str, variables: dict[str, str], context: str) -> str
 
     return re.sub(r'\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}', replacer, text)
 
+def _load_imported_raw(yaml_path: Path, import_base_path: str) -> dict:
+    """Load the imported library as raw YAML dict (not a full BuildSpec)."""
+    if not import_base_path:
+        raise ValueError("import-base cannot be empty")
+    import_path = (yaml_path.parent / import_base_path).resolve()
+    if not import_path.is_file():
+        raise FileNotFoundError(f"Imported base YAML not found: {import_path}")
+    with open(import_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
 def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
     """Completely forbid the user from specifying the root directory.
     fastcontainer now injects it automatically."""
@@ -465,10 +475,12 @@ class BuildSpec:
     yaml_path: Path
     yaml_hash: str
     profiles: Dict[str, NspawnProfile]
-    snippets: Dict[str, str] = field(default_factory=dict)   # NEW: name → raw command string
+    snippets: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_yaml(cls, yaml_path: Path, variables: dict[str, str] | None = None) -> "BuildSpec":
+    def from_yaml(
+        cls, yaml_path: Path, variables: dict[str, str] | None = None
+    ) -> "BuildSpec":
         if variables is None:
             variables = {}
 
@@ -476,21 +488,51 @@ class BuildSpec:
             raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
 
         with open(yaml_path, "r", encoding="utf-8") as f:
-            spec = yaml.safe_load(f)
+            spec_raw = yaml.safe_load(f) or {}
 
-        base_raw = spec.get("base")
-        if base_raw is None:
-            raise ValueError("YAML must contain 'base:'")
+        import_base = spec_raw.pop("import-base", None)
+        base_raw = spec_raw.get("base")
 
-        base = BaseSpec.from_data(base_raw, variables=variables)
+        if import_base is not None and base_raw is not None:
+            raise ValueError(
+                f"YAML {yaml_path.name} contains both 'base:' and 'import-base:'. "
+                "Only one is allowed."
+            )
 
-        # === NEW: Parse reusable snippets ===
-        snippets_raw = spec.get("snippets", {})
+        if import_base is not None:
+            # Load imported file as raw dict only
+            imported_raw = _load_imported_raw(yaml_path, import_base)
+
+            # Base must come from the imported file
+            if "base" not in imported_raw:
+                raise ValueError(f"Imported file {import_base} must contain a 'base:' section")
+            base = BaseSpec.from_data(imported_raw["base"], variables=variables)
+
+            # Snippets from import (will be overridden by local later)
+            imported_snippets_raw = imported_raw.get("snippets", {})
+            if not isinstance(imported_snippets_raw, dict):
+                imported_snippets_raw = {}
+
+            # Profiles from import (raw dicts)
+            imported_profiles_raw = imported_raw.get("profiles", {})
+            if not isinstance(imported_profiles_raw, dict):
+                imported_profiles_raw = {}
+        else:
+            # Normal local base (no import)
+            if base_raw is None:
+                raise ValueError("YAML must contain either 'base:' or 'import-base:'")
+            base = BaseSpec.from_data(base_raw, variables=variables)
+            imported_snippets_raw = {}
+            imported_profiles_raw = {}
+
+        # === snippets: imported + local override ===
         snippets: Dict[str, str] = {}
-        if not isinstance(snippets_raw, dict):
-            raise ValueError("snippets: must be a dictionary (name → command or {RUN: ...})")
+        local_snippets_raw = spec_raw.pop("snippets", {}) or {}
+        if not isinstance(local_snippets_raw, dict):
+            raise ValueError("snippets: must be a dictionary")
 
-        for name, data in snippets_raw.items():
+        # Start with imported snippets
+        for name, data in imported_snippets_raw.items():
             if isinstance(data, dict) and "RUN" in data:
                 cmd_raw = data["RUN"]
             else:
@@ -498,27 +540,39 @@ class BuildSpec:
             cmd_str = "\n".join(cmd_raw) if isinstance(cmd_raw, list) else str(cmd_raw)
             snippets[name] = cmd_str.strip() if cmd_str.strip() else ""
 
-        profiles_raw = spec.get("profiles")
-        if not profiles_raw or not isinstance(profiles_raw, dict) or len(profiles_raw) == 0:
-            raise ValueError("YAML must contain a non-empty 'profiles:' dictionary")
+        # Local snippets override
+        for name, data in local_snippets_raw.items():
+            if isinstance(data, dict) and "RUN" in data:
+                cmd_raw = data["RUN"]
+            else:
+                cmd_raw = data
+            cmd_str = "\n".join(cmd_raw) if isinstance(cmd_raw, list) else str(cmd_raw)
+            snippets[name] = cmd_str.strip() if cmd_str.strip() else ""
 
-        profile_data: Dict[str, dict] = {name: data for name, data in profiles_raw.items()}
+        # === profiles: imported + local override (raw dicts) ===
+        local_profiles_raw = spec_raw.pop("profiles", {}) or {}
+        if not isinstance(local_profiles_raw, dict):
+            raise ValueError("profiles: must be a dictionary")
 
+        final_profiles_raw = dict(imported_profiles_raw)  # start with imported
+        final_profiles_raw.update(local_profiles_raw)     # local completely replaces
+
+        # Now resolve all profiles (exactly like before)
         resolved: Dict[str, NspawnProfile] = {}
         visiting: set[str] = set()
 
         def resolve_profile(name: str) -> NspawnProfile:
             if name in resolved:
                 return resolved[name]
-            if name not in profile_data:
-                raise ValueError(f"Profile '{name}' not found in YAML")
+            if name not in final_profiles_raw:
+                raise ValueError(f"Profile '{name}' not found in YAML (or imported base)")
 
             if name in visiting:
                 raise ValueError(f"Circular dependency detected involving profile '{name}'")
 
             visiting.add(name)
-            data = profile_data[name]
-            extend_name = data.get("extend")
+            data = final_profiles_raw[name]          # ← always a dict now
+            extend_name = data.get("extend")         # ← safe .get()
 
             if extend_name:
                 if extend_name == name:
@@ -527,17 +581,17 @@ class BuildSpec:
 
             profile = NspawnProfile.from_dict(
                 name=name,
-                data=data,
+                data=data,                           # ← always dict
                 resolved_profiles=resolved,
                 base_nspawn=base.nspawn_add,
                 variables=variables,
-                snippets=snippets,          # ← NEW
+                snippets=snippets,
             )
             resolved[name] = profile
             visiting.remove(name)
             return profile
 
-        for name in list(profile_data.keys()):
+        for name in list(final_profiles_raw.keys()):
             resolve_profile(name)
 
         yaml_hash = hashlib.sha1(yaml_path.read_bytes()).hexdigest()
