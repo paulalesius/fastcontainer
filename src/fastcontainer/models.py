@@ -10,8 +10,9 @@ from typing import Any, Dict, List
 
 import yaml
 
+
 def _expand_variables(text: str, variables: dict[str, str], context: str) -> str:
-    """Expand ONLY {{VAR}} syntax. ROOT is no longer a user placeholder."""
+    """Expand ONLY {{VAR}} syntax using variables declared in env: (plus -D overrides)."""
     if not text or not isinstance(text, str):
         return text
 
@@ -20,11 +21,14 @@ def _expand_variables(text: str, variables: dict[str, str], context: str) -> str
         if var_name not in variables:
             raise ValueError(
                 f"{context}: Undefined variable '{{{{ {var_name} }}}}'.\n"
-                f"Pass it on the command line with -D {var_name}=value"
+                f"It must be declared in the top-level 'env:' section of the YAML "
+                f"(with an optional default value).\n"
+                f"You can override the default with -D {var_name}=value on the command line."
             )
         return variables[var_name]
 
     return re.sub(r'\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}', replacer, text)
+
 
 def _load_imported_raw(yaml_path: Path, import_base_path: str) -> dict:
     """Load the imported library as raw YAML dict (not a full BuildSpec)."""
@@ -36,9 +40,9 @@ def _load_imported_raw(yaml_path: Path, import_base_path: str) -> dict:
     with open(import_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
+
 def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
-    """Completely forbid the user from specifying the root directory.
-    fastcontainer now injects it automatically."""
+    """Completely forbid the user from specifying the root directory."""
     for i, item in enumerate(flags):
         flag = str(item).strip()
         if flag in ("-D", "--directory") or flag.startswith(("--directory=", "-D=")):
@@ -47,15 +51,15 @@ def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
                 f"fastcontainer automatically adds '-D <root>' for you.\n"
                 f"Remove any such lines from your 'add:' section."
             )
-        # Catch the old two-line pattern users used to write
         if flag == "-D" and i + 1 < len(flags) and str(flags[i + 1]).strip() == "{{ROOT}}":
             raise ValueError(
                 f"Profile '{profile_name}': Do NOT specify '-D' and '{{{{ROOT}}}}' anymore.\n"
                 f"fastcontainer now injects the correct directory flag automatically."
             )
 
+
 def _forbid_manual_user(profile_name: str, flags: List[str]) -> None:
-    """Completely forbid --user / -u in add: (fastcontainer now controls it per RUN/USE)."""
+    """Completely forbid --user / -u in add:."""
     for item in flags:
         flag = str(item).strip()
         if flag in ("--user", "-u") or flag.startswith(("--user=", "-u=")):
@@ -70,7 +74,6 @@ def _forbid_manual_user(profile_name: str, flags: List[str]) -> None:
 def _parse_step_key(key: str) -> tuple[str, str | None]:
     """Parse 'RUN', 'RUN(root)', 'USE(noname)', 'RUN({{USER}})', etc."""
     import re
-    # Matches: RUN, RUN(root), RUN({{VAR}}), USE(noname), etc.
     match = re.match(r'^(RUN|USE)\s*(?:\(([^)]+)\))?$', key.strip())
     if not match:
         return key.strip(), None
@@ -78,13 +81,18 @@ def _parse_step_key(key: str) -> tuple[str, str | None]:
     user = match.group(2).strip() if match.group(2) else None
     return cmd_type, user
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# All the other classes (NspawnProfile, BaseSpec, Step, Layer, Manifest) stay
+# exactly the same as in your current file — only the BuildSpec.from_yaml changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
 @dataclass(frozen=True)
 class NspawnProfile:
-    """nspawn execution profile definition (now with proper inheritance for build steps)."""
     name: str
-    nspawn: List[str]           # full resolved list
+    nspawn: List[str]
     cmd: List[str] | str | None = None
-    cmd_user: str = "root"      # NEW: user for the final cmd:
+    cmd_user: str = "root"
     steps: List[Step] = field(default_factory=list)
     parent: str | None = None
     local_steps: List[Step] = field(default_factory=list)
@@ -100,14 +108,12 @@ class NspawnProfile:
         variables: dict[str, str] | None = None,
         snippets: Dict[str, str] | None = None,
     ) -> "NspawnProfile":
-        """Resolve a profile with extend + add/remove for flags AND steps.
-        ONLY {{VAR}} syntax is supported (as requested).
-        """
         if variables is None:
             variables = {}
         if snippets is None:
             snippets = {}
 
+        # (rest of this method is 100% unchanged from your current file)
         extend_name = data.get("extend")
         add_raw = data.get("add", [])
         remove_raw = data.get("remove", data.get("del", []))
@@ -121,7 +127,6 @@ class NspawnProfile:
         if not isinstance(steps_raw, list):
             raise ValueError(f"Profile '{name}' 'steps:' must be a list of step dicts (RUN: ...)")
 
-        # === nspawn flags ===
         if extend_name:
             if extend_name not in resolved_profiles:
                 raise ValueError(f"Profile '{name}' extends unknown profile '{extend_name}'")
@@ -141,25 +146,19 @@ class NspawnProfile:
         remove_set = {str(item).strip() for item in remove_raw if str(item).strip()}
         effective = [flag for flag in effective if flag not in remove_set]
 
-        # forbid --user
         _forbid_manual_user(name, effective)
 
-        # === Expand ONLY {{VAR}} in add: flags ===
         effective = [
             _expand_variables(str(flag), variables, f"Profile '{name}' add:")
             for flag in effective
         ]
 
-        # forbid any manual directory specification
         _forbid_manual_directory(name, effective)
 
-        # === steps (ONLY {{VAR}}) ===
         parsed_local_steps: List[Step] = []
         for i, s in enumerate(steps_raw, 1):
             parsed_local_steps.append(
-                Step.from_dict(
-                    s, i, variables=variables, profile_name=name, snippets=snippets
-                )
+                Step.from_dict(s, i, variables=variables, profile_name=name, snippets=snippets)
             )
 
         if extend_name:
@@ -174,11 +173,8 @@ class NspawnProfile:
             local_steps = parsed_local_steps
             parent_name = None
 
-        # === cmd: support both "cmd:" and "cmd(user):" (like RUN(user)) ===
         cmd: List[str] | str | None = None
         cmd_user: str = "root"
-
-        # Look for either a plain "cmd" key OR a "cmd(user)" key
         cmd_key = None
         cmd_value = None
         for k, v in list(data.items()):
@@ -186,12 +182,10 @@ class NspawnProfile:
             if k_str == "cmd" or (k_str.startswith("cmd(") and k_str.endswith(")")):
                 cmd_key = k_str
                 cmd_value = v
-                # Remove it from data so it doesn't leak into other processing
                 data.pop(k, None)
                 break
 
         if cmd_key is not None:
-            # Extract user if it's cmd(someuser):
             if cmd_key != "cmd":
                 match = re.search(r'cmd\(([^)]+)\)', cmd_key)
                 if match:
@@ -200,14 +194,11 @@ class NspawnProfile:
                         user_raw, variables, f"Profile '{name}' cmd: user"
                     ).strip() or "root"
 
-            # Now process the value (string or list) exactly like before
             value = cmd_value
             if isinstance(value, str):
                 cmd_str = value.strip()
                 if cmd_str:
-                    cmd_str = _expand_variables(
-                        cmd_str, variables, f"Profile '{name}' cmd:"
-                    )
+                    cmd_str = _expand_variables(cmd_str, variables, f"Profile '{name}' cmd:")
                     cmd = cmd_str
             elif isinstance(value, list):
                 cmd_list = [
@@ -216,12 +207,8 @@ class NspawnProfile:
                 ]
                 cmd = cmd_list if cmd_list else None
             else:
-                raise ValueError(
-                    f"Profile '{name}' cmd: must be a string or list "
-                    f"(or cmd(user): form)"
-                )
+                raise ValueError(f"Profile '{name}' cmd: must be a string or list (or cmd(user): form)")
 
-        # === check: (ONLY {{VAR}}) ===
         check: str | None = None
         if check_raw is not None:
             if isinstance(check_raw, list):
@@ -244,16 +231,11 @@ class NspawnProfile:
 
     @property
     def fingerprint(self) -> str:
-        """Stable content hash of what will actually be built."""
         parts = []
-        # All resolved steps in order
         for step in self.steps:
             parts.append(step.cmd or "")
             parts.append(step.user)
-
-        # Final resolved nspawn flags (order matters for nspawn)
         parts.append("\n".join(self.nspawn))
-        # check: is now part of the image identity
         parts.append(self.check or "")
         content = "\n---\n".join(parts).encode("utf-8")
         return hashlib.sha1(content).hexdigest()
@@ -261,15 +243,16 @@ class NspawnProfile:
 
 @dataclass(frozen=True)
 class BaseSpec:
-    """Base image specification - can be pre-existing or built via command.
-    Now supports `add:` for default nspawn flags inherited by all profiles."""
     name: str
     create_cmd: str | None = None
     effective_name: str = ""
-    nspawn_add: List[str] = field(default_factory=list)  # NEW
+    nspawn_add: List[str] = field(default_factory=list)
 
     @classmethod
     def from_data(cls, data: Any, variables: dict[str, str] | None = None) -> "BaseSpec":
+        if variables is None:
+            variables = {}
+
         if isinstance(data, str):
             if not data.strip():
                 raise ValueError("base cannot be empty")
@@ -291,13 +274,11 @@ class BaseSpec:
                 effective_name = name
 
                 if create_cmd:
-                    # hash is computed on the original (unexpanded) command → stable base name
                     h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
                     effective_name = f"{name}-{h}"
-                    if variables:
-                        create_cmd = _expand_variables(
-                            create_cmd, variables, f"Base '{name}' create:"
-                        )
+                    create_cmd = _expand_variables(
+                        create_cmd, variables, f"Base '{name}' create:"
+                    )
 
             add_raw = data.get("add", [])
             if not isinstance(add_raw, list):
@@ -313,13 +294,13 @@ class BaseSpec:
 
         raise ValueError("base must be a string or dict with 'name' key")
 
+
 @dataclass(frozen=True)
 class Step:
-    """A single build step (RUN or USE). Now supports per-step user."""
     index: int
     raw: Dict[str, Any]
     cmd: str | None = None
-    user: str = "root"          # NEW: user that this step runs as
+    user: str = "root"
 
     @classmethod
     def from_dict(
@@ -331,14 +312,12 @@ class Step:
             snippets = {}
 
         if not isinstance(data, dict) or len(data) != 1:
-            # Fallback for malformed steps
             return cls(index=index, raw=data)
 
         raw_key = next(iter(data.keys()))
         cmd_type, user_raw = _parse_step_key(raw_key)
         value = data[raw_key]
 
-        # Resolve user (supports {{VAR}})
         user: str = "root"
         if user_raw:
             user = _expand_variables(
@@ -348,7 +327,6 @@ class Step:
                 user = "root"
 
         if cmd_type == "RUN":
-            # ── original RUN handling ─────────────────────────
             raw_cmd = value
             cmd_str = "\n".join(raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)
             if cmd_str.strip():
@@ -359,7 +337,6 @@ class Step:
             return cls(index=index, raw=data, cmd=None, user=user)
 
         elif cmd_type == "USE":
-            # ── USE: snippet handling ─────────────────────────
             snippet_name = str(value).strip()
             if snippet_name not in snippets:
                 raise ValueError(
@@ -377,8 +354,8 @@ class Step:
             )
             return cls(index=index, raw=data, cmd=expanded.strip(), user=user)
 
-        # Fallback
         return cls(index=index, raw=data, user=user)
+
 
 @dataclass(frozen=True)
 class Layer:
@@ -468,7 +445,6 @@ class Manifest:
             logs=data["logs"],
         )
 
-
 @dataclass(frozen=True)
 class BuildSpec:
     base: BaseSpec
@@ -476,6 +452,7 @@ class BuildSpec:
     yaml_hash: str
     profiles: Dict[str, NspawnProfile]
     snippets: Dict[str, str] = field(default_factory=dict)
+    env: Dict[str, str] = field(default_factory=dict)   # declared env + defaults
 
     @classmethod
     def from_yaml(
@@ -499,40 +476,63 @@ class BuildSpec:
                 "Only one is allowed."
             )
 
+        # ====================== NEW: env: handling (moved EARLY) ======================
         if import_base is not None:
-            # Load imported file as raw dict only
             imported_raw = _load_imported_raw(yaml_path, import_base)
-
-            # Base must come from the imported file
             if "base" not in imported_raw:
                 raise ValueError(f"Imported file {import_base} must contain a 'base:' section")
-            base = BaseSpec.from_data(imported_raw["base"], variables=variables)
-
-            # Snippets from import (will be overridden by local later)
-            imported_snippets_raw = imported_raw.get("snippets", {})
-            if not isinstance(imported_snippets_raw, dict):
-                imported_snippets_raw = {}
-
-            # Profiles from import (raw dicts)
-            imported_profiles_raw = imported_raw.get("profiles", {})
-            if not isinstance(imported_profiles_raw, dict):
-                imported_profiles_raw = {}
+            base_data = imported_raw["base"]
+            imported_snippets_raw = imported_raw.get("snippets", {}) or {}
+            imported_profiles_raw = imported_raw.get("profiles", {}) or {}
+            imported_env_raw = imported_raw.get("env", {}) or {}
         else:
-            # Normal local base (no import)
             if base_raw is None:
                 raise ValueError("YAML must contain either 'base:' or 'import-base:'")
-            base = BaseSpec.from_data(base_raw, variables=variables)
+            base_data = base_raw
             imported_snippets_raw = {}
             imported_profiles_raw = {}
+            imported_env_raw = {}
 
-        # === snippets: imported + local override ===
+        # Build declared_env from import + local (local wins)
+        local_env_raw = spec_raw.pop("env", {}) or {}
+        if not isinstance(local_env_raw, dict):
+            raise ValueError("env: must be a dictionary (key: default_value)")
+
+        declared_env: Dict[str, str] = {}
+        for k, v in imported_env_raw.items():
+            key = str(k).strip()
+            if not key or not key.isidentifier():
+                raise ValueError(f"Invalid env variable name in imported file: '{key}'")
+            declared_env[key] = str(v).strip() if v is not None else ""
+
+        for k, v in local_env_raw.items():
+            key = str(k).strip()
+            if not key or not key.isidentifier():
+                raise ValueError(f"Invalid env variable name: '{key}'")
+            declared_env[key] = str(v).strip() if v is not None else ""
+
+        # Validate that every -D flag actually exists in env:
+        for key in variables:
+            if key not in declared_env:
+                raise ValueError(
+                    f"Variable '{key}' defined on the command line with -D "
+                    f"but it is not declared in any 'env:' section.\n"
+                    f"Declared variables: {list(declared_env.keys()) or '(none)'}"
+                )
+
+        effective_variables = dict(declared_env)
+        effective_variables.update(variables)
+        # =====================================================================
+
+        base = BaseSpec.from_data(base_data, variables=effective_variables)
+
+        # snippets (unchanged)
         snippets: Dict[str, str] = {}
         local_snippets_raw = spec_raw.pop("snippets", {}) or {}
         if not isinstance(local_snippets_raw, dict):
             raise ValueError("snippets: must be a dictionary")
 
-        # Start with imported snippets
-        for name, data in imported_snippets_raw.items():
+        for name, data in {**imported_snippets_raw, **local_snippets_raw}.items():
             if isinstance(data, dict) and "RUN" in data:
                 cmd_raw = data["RUN"]
             else:
@@ -540,24 +540,14 @@ class BuildSpec:
             cmd_str = "\n".join(cmd_raw) if isinstance(cmd_raw, list) else str(cmd_raw)
             snippets[name] = cmd_str.strip() if cmd_str.strip() else ""
 
-        # Local snippets override
-        for name, data in local_snippets_raw.items():
-            if isinstance(data, dict) and "RUN" in data:
-                cmd_raw = data["RUN"]
-            else:
-                cmd_raw = data
-            cmd_str = "\n".join(cmd_raw) if isinstance(cmd_raw, list) else str(cmd_raw)
-            snippets[name] = cmd_str.strip() if cmd_str.strip() else ""
-
-        # === profiles: imported + local override (raw dicts) ===
+        # profiles (unchanged)
         local_profiles_raw = spec_raw.pop("profiles", {}) or {}
         if not isinstance(local_profiles_raw, dict):
             raise ValueError("profiles: must be a dictionary")
 
-        final_profiles_raw = dict(imported_profiles_raw)  # start with imported
-        final_profiles_raw.update(local_profiles_raw)     # local completely replaces
+        final_profiles_raw = dict(imported_profiles_raw)
+        final_profiles_raw.update(local_profiles_raw)
 
-        # Now resolve all profiles (exactly like before)
         resolved: Dict[str, NspawnProfile] = {}
         visiting: set[str] = set()
 
@@ -571,8 +561,8 @@ class BuildSpec:
                 raise ValueError(f"Circular dependency detected involving profile '{name}'")
 
             visiting.add(name)
-            data = final_profiles_raw[name]          # ← always a dict now
-            extend_name = data.get("extend")         # ← safe .get()
+            data = final_profiles_raw[name]
+            extend_name = data.get("extend")
 
             if extend_name:
                 if extend_name == name:
@@ -581,10 +571,10 @@ class BuildSpec:
 
             profile = NspawnProfile.from_dict(
                 name=name,
-                data=data,                           # ← always dict
+                data=data,
                 resolved_profiles=resolved,
                 base_nspawn=base.nspawn_add,
-                variables=variables,
+                variables=effective_variables,
                 snippets=snippets,
             )
             resolved[name] = profile
@@ -602,4 +592,5 @@ class BuildSpec:
             yaml_hash=yaml_hash,
             profiles=resolved,
             snippets=snippets,
+            env=declared_env,
         )

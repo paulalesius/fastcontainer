@@ -80,13 +80,44 @@ Pass `-s` (or `--shell`) to drop into an interactive shell:
 
 The shell always respects the user defined for that step/profile.
 
-### Variables (`-D`)
+### Variables (`-D`) and `env:` — **New in v0.9.1**
 
-```bash
-sudo fastcontainer build ... -D HOST_CACHE=/home/noname/.cache -D MYUSER=noname
+All variables used with `{{VAR}}` must now be explicitly declared in a top-level `env:` section (in the current YAML or any `import-base:`).
+
+```yaml
+env:
+  HOST_CACHE: /tmp/default-cache          # default value
+  NVIDIA_DRIVER_VERSION: 595.58.03
+  USER_HOME_DIR: /home/noname
+  CACHE_STORE_DIR: /data/fastcontainer-cache
+
+base:
+  create: |
+    debootstrap --cache-dir={{CACHE_STORE_DIR}}/debootstrap ...
+
+profiles:
+  common:
+    add:
+      - "--bind={{CACHE_STORE_DIR}}/apt-cache:/var/cache/apt"
+      - "--bind={{HOST_CACHE}}:/root/.cache"
 ```
 
-Use `{{VAR}}` inside `add:`, `RUN:`, `cmd:`, `create:`, etc. Only `{{VAR}}` syntax is supported (no `${VAR}` or `$VAR`).
+**Rules:**
+- `{{VAR}}` can only be used for variables listed in `env:` (anywhere in the inheritance/import tree).
+- `-D KEY=VALUE` on the command line can **only** override variables that are declared in `env:`.
+- Local `env:` overrides imported `env:`.
+- Clear error messages are shown for:
+  - Using an undeclared `{{VAR}}`
+  - Passing a `-D` for a variable that is not in any `env:`
+
+**Example command:**
+```bash
+sudo fastcontainer build ... -p default \
+  -D HOST_CACHE=/home/noname/.cache \
+  -D CACHE_STORE_DIR=/my/custom/cache
+```
+
+Variables are supported in `base.create:`, `base.add:`, `add:`, `steps:`, `cmd:`, `check:`, and snippets.
 
 ### Profiles & Inheritance
 
