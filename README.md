@@ -140,11 +140,12 @@ profiles:
           # CUDA-specific steps here
 ```
 
-### Base Import (`import-base:`) — **New in v0.9.0**
+### Base Import (`import-base:`) — **New in v0.9.0+**
 
-Extract common bases, snippets, and profiles into reusable library files.
+Extract common bases, snippets, and profiles into reusable library files.  
+**Supports full chaining** — you can have `three.yaml` → `two.yaml` → `one.yaml` (and so on).
 
-**Library file** (`common-ubuntu-base.yaml`):
+**Library file** (`one.yaml`):
 ```yaml
 base:
   name: ubuntu-noble-minimal
@@ -164,31 +165,37 @@ profiles:
           apt install -y software-properties-common wget git ...
 ```
 
-**Project file** (now tiny):
+**Intermediate file** (`two.yaml`):
 ```yaml
-import-base: common-ubuntu-base.yaml   # ← brings base + snippets + profiles
-
+import-base: one.yaml
 profiles:
   cuda:
-    extend: common                     # works even if 'common' came from the library
+    extend: common
     steps:
       - RUN: |
-          # your CUDA-specific steps...
-
-  run-llama-cpp:
-    extend: cuda
-    # your project-specific add: and cmd: ...
+          # CUDA-specific steps...
 ```
 
-**Rules:**
-- Use **either** `base:` **or** `import-base:`, never both (clear error if both are present).
-- The imported file **must** contain a `base:` section.
-- Local `profiles:` and `snippets:` **completely override** anything with the same name from the library.
-- `extend:` works transparently whether the parent profile is local or imported.
-- Paths are resolved relative to the importing YAML file.
-- Only **one** import per file.
+**Project file** (`three.yaml`):
+```yaml
+import-base: two.yaml
 
-This makes large projects dramatically shorter while keeping all the shared knowledge (Ubuntu base, CUDA setup, GPU binds, etc.) in one maintainable place.
+profiles:
+  run-llama-cpp:
+    extend: cuda
+    # your final add: / cmd: / steps: ...
+```
+
+**Rules (updated):**
+- Use **either** `base:` **or** `import-base:`, never both (clear error if both are present).
+- The deepest file in the chain **must** contain a `base:` section.
+- `profiles:`, `snippets:`, and `env:` are merged recursively. Local values always override imported ones.
+- `extend:` works transparently across the entire import chain.
+- Paths are resolved relative to the importing YAML file.
+- Circular imports are detected and rejected with a clear error.
+- Arbitrary depth is supported (not limited to one level).
+
+This makes large projects dramatically shorter while keeping all the shared knowledge in one maintainable place.
 
 ### Reusable Snippets (`snippets:` + `USE:`)
 

@@ -29,17 +29,48 @@ def _expand_variables(text: str, variables: dict[str, str], context: str) -> str
 
     return re.sub(r'\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}', replacer, text)
 
+def _resolve_yaml(yaml_path: Path, visited: set[Path] | None = None) -> dict:
+    """Recursively resolve import-base chains and merge sections (local values override imported)."""
+    if visited is None:
+        visited = set()
 
-def _load_imported_raw(yaml_path: Path, import_base_path: str) -> dict:
-    """Load the imported library as raw YAML dict (not a full BuildSpec)."""
-    if not import_base_path:
-        raise ValueError("import-base cannot be empty")
-    import_path = (yaml_path.parent / import_base_path).resolve()
-    if not import_path.is_file():
-        raise FileNotFoundError(f"Imported base YAML not found: {import_path}")
-    with open(import_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    resolved_path = yaml_path.resolve()
+    if resolved_path in visited:
+        raise ValueError(f"Circular import-base detected involving {yaml_path}")
+    visited.add(resolved_path)
 
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        raw: dict = yaml.safe_load(f) or {}
+
+    import_base = raw.get("import-base")
+    if import_base is not None:
+        if raw.get("base") is not None:
+            raise ValueError(
+                f"YAML {yaml_path.name} contains both 'base:' and 'import-base:'. "
+                "Only one is allowed."
+            )
+
+        import_base = raw.pop("import-base")
+        import_path = (yaml_path.parent / import_base).resolve()
+        if not import_path.is_file():
+            raise FileNotFoundError(f"Imported YAML not found: {import_path}")
+
+        imported = _resolve_yaml(import_path, visited)
+
+        # Merge: imported → raw (raw/local always wins for base, profiles, snippets, env)
+        for key in ("base", "profiles", "snippets", "env"):
+            if key in imported:
+                imported_val = imported[key]
+                local_val = raw.get(key)
+                if isinstance(imported_val, dict) and isinstance(local_val, dict):
+                    merged = dict(imported_val)
+                    merged.update(local_val)
+                    raw[key] = merged
+                elif local_val is None:
+                    raw[key] = imported_val
+
+    visited.remove(resolved_path)
+    return raw
 
 def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
     """Completely forbid the user from specifying the root directory."""
@@ -464,47 +495,15 @@ class BuildSpec:
         if not yaml_path.is_file():
             raise FileNotFoundError(f"prepare.yaml not found at {yaml_path}")
 
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            spec_raw = yaml.safe_load(f) or {}
+        # === NEW: full recursive import-base support ===
+        spec_raw = _resolve_yaml(yaml_path)
 
-        import_base = spec_raw.pop("import-base", None)
-        base_raw = spec_raw.get("base")
-
-        if import_base is not None and base_raw is not None:
-            raise ValueError(
-                f"YAML {yaml_path.name} contains both 'base:' and 'import-base:'. "
-                "Only one is allowed."
-            )
-
-        # ====================== NEW: env: handling (moved EARLY) ======================
-        if import_base is not None:
-            imported_raw = _load_imported_raw(yaml_path, import_base)
-            if "base" not in imported_raw:
-                raise ValueError(f"Imported file {import_base} must contain a 'base:' section")
-            base_data = imported_raw["base"]
-            imported_snippets_raw = imported_raw.get("snippets", {}) or {}
-            imported_profiles_raw = imported_raw.get("profiles", {}) or {}
-            imported_env_raw = imported_raw.get("env", {}) or {}
-        else:
-            if base_raw is None:
-                raise ValueError("YAML must contain either 'base:' or 'import-base:'")
-            base_data = base_raw
-            imported_snippets_raw = {}
-            imported_profiles_raw = {}
-            imported_env_raw = {}
-
-        # Build declared_env from import + local (local wins)
+        # env handling (now fully merged from the whole import chain)
         local_env_raw = spec_raw.pop("env", {}) or {}
         if not isinstance(local_env_raw, dict):
             raise ValueError("env: must be a dictionary (key: default_value)")
 
         declared_env: Dict[str, str] = {}
-        for k, v in imported_env_raw.items():
-            key = str(k).strip()
-            if not key or not key.isidentifier():
-                raise ValueError(f"Invalid env variable name in imported file: '{key}'")
-            declared_env[key] = str(v).strip() if v is not None else ""
-
         for k, v in local_env_raw.items():
             key = str(k).strip()
             if not key or not key.isidentifier():
@@ -522,17 +521,20 @@ class BuildSpec:
 
         effective_variables = dict(declared_env)
         effective_variables.update(variables)
-        # =====================================================================
 
-        base = BaseSpec.from_data(base_data, variables=effective_variables)
+        base_raw = spec_raw.get("base")
+        if base_raw is None:
+            raise ValueError("No 'base:' section found after resolving imports")
 
-        # snippets (unchanged)
+        base = BaseSpec.from_data(base_raw, variables=effective_variables)
+
+        # snippets (already merged from chain)
         snippets: Dict[str, str] = {}
         local_snippets_raw = spec_raw.pop("snippets", {}) or {}
         if not isinstance(local_snippets_raw, dict):
             raise ValueError("snippets: must be a dictionary")
 
-        for name, data in {**imported_snippets_raw, **local_snippets_raw}.items():
+        for name, data in local_snippets_raw.items():
             if isinstance(data, dict) and "RUN" in data:
                 cmd_raw = data["RUN"]
             else:
@@ -540,13 +542,12 @@ class BuildSpec:
             cmd_str = "\n".join(cmd_raw) if isinstance(cmd_raw, list) else str(cmd_raw)
             snippets[name] = cmd_str.strip() if cmd_str.strip() else ""
 
-        # profiles (unchanged)
+        # profiles (already merged from chain)
         local_profiles_raw = spec_raw.pop("profiles", {}) or {}
         if not isinstance(local_profiles_raw, dict):
             raise ValueError("profiles: must be a dictionary")
 
-        final_profiles_raw = dict(imported_profiles_raw)
-        final_profiles_raw.update(local_profiles_raw)
+        final_profiles_raw = local_profiles_raw   # the recursive merge already did the work
 
         resolved: Dict[str, NspawnProfile] = {}
         visiting: set[str] = set()
