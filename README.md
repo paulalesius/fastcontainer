@@ -26,8 +26,6 @@ Perfect for machine-learning research, GPU-heavy experiments, and any workflow w
 
 ```bash
 sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-s] [-D KEY=VALUE]... [-- <command...>]
-
-sudo fastcontainer exec <containers_dir> <image-name> <command...> [-v]
 ```
 
 ### Per-Step User (`RUN(user):` / `USE(user):` / `cmd(user):`)

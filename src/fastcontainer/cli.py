@@ -1,5 +1,5 @@
 """
-fastcontainer CLI — build + exec
+fastcontainer CLI — build
 """
 import os
 import sys
@@ -10,7 +10,6 @@ import click
 
 from .models import BuildSpec, Manifest
 from .builder import Builder
-from .nspawn import exec_in_container
 from .log import setup_logger
 from contextlib import contextmanager
 
@@ -34,7 +33,7 @@ def acquire_build_lock(containers_dir: Path):
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
-    """Minimal btrfs + systemd-nspawn layered container builder + runner."""
+    """Minimal btrfs + systemd-nspawn layered container builder."""
     pass
 
 
@@ -116,37 +115,6 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
     except Exception as e:
         logger.error(f"ERROR: Build failed: {e}")
         sys.exit(1)
-
-@main.command()
-@click.argument("containers_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path, resolve_path=True))
-@click.argument("image", type=str)
-@click.option('-v', '--verbose', is_flag=True, help="Verbose mode")
-@click.argument("command", nargs=-1, type=click.UNPROCESSED, required=True)
-def exec(containers_dir: Path, image: str, verbose: bool, command: tuple[str, ...]) -> None:
-    """Run a command inside a built container."""
-    logger = setup_logger(verbose=verbose)
-
-    if os.geteuid() != 0:
-        logger.error("ERROR: Must be run as root")
-        sys.exit(1)
-
-    container_path = containers_dir / image
-    if not container_path.is_dir():
-        logger.error(f"ERROR: Container '{image}' not found in {containers_dir}")
-        sys.exit(1)
-
-    manifest = Manifest.from_subvolume(container_path)
-
-    logger.info(f"Running in {image}: {' '.join(command)}")
-
-    exec_in_container(
-        root=container_path,
-        command=list(command),
-        nspawn_template=manifest.nspawn_template,
-    )
-
-    logger.info(f"Command finished in {image}")
-
 
 if __name__ == "__main__":
     main()
