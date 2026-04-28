@@ -301,15 +301,21 @@ class BaseSpec:
 
             if create_raw:
                 cmd_str = "\n".join(create_raw) if isinstance(create_raw, list) else str(create_raw)
-                create_cmd = cmd_str.strip() if cmd_str.strip() else None
-                effective_name = name
+                create_cmd_template = cmd_str.strip() if cmd_str.strip() else None
 
-                if create_cmd:
-                    h = hashlib.sha1(create_cmd.encode("utf-8")).hexdigest()[:16]
-                    effective_name = f"{name}-{h}"
-                    create_cmd = _expand_variables(
-                        create_cmd, variables, f"Base '{name}' create:"
+                if create_cmd_template:
+                    expanded = _expand_variables(
+                        create_cmd_template, variables, f"Base '{name}' create:"
                     )
+                    h = hashlib.sha1(expanded.encode("utf-8")).hexdigest()[:16]
+                    effective_name = f"{name}-{h}"
+                    create_cmd = expanded
+                else:
+                    create_cmd = None
+                    effective_name = name
+            else:
+                create_cmd = None
+                effective_name = name
 
             add_raw = data.get("add", [])
             if not isinstance(add_raw, list):
