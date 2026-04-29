@@ -147,8 +147,12 @@ class Builder:
         nice_preview = _preview(step)
 
         if layer_path.is_dir():
-            self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
-            return Layer(path=layer_path, hash=step_hash)
+            if self.run_cmd:  # ← leaf profile (the one user actually called with -p)
+                self.logger.info(f"Step {step.index}/{total_steps} (forced for leaf) {nice_preview}")
+                # force rebuild so new/changed steps in run-*/cmd profiles are never stale
+            else:
+                self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
+                return Layer(path=layer_path, hash=step_hash)
 
         self.logger.info(f"Step {step.index}/{total_steps} {nice_preview}")
 
@@ -250,16 +254,14 @@ class Builder:
                     verbose=self.verbose,
                 ):
                     self.logger.info("Check passed - using cached image")
-                    self._handle_success()
-                    return
+                    # fall through → delta build will still run (fast cache hit)
                 else:
                     self.logger.warning("Check failed - deleting cache and forcing rebuild")
                     delete(self.final_path)
 
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
-                self._handle_success()
-                return
+                # fall through → delta build will still run (fast cache hit)
 
         self.logger.info(f"Building profile: {self.profile.name}")
         if self.profile.parent:
@@ -295,7 +297,13 @@ class Builder:
             self.logger.error(f"Build failed at {step_info} in profile '{self.profile.name}'")
             raise
         else:
-            self.logger.info("All steps completed successfully. Creating final image...")
+            self.logger.info("All steps completed successfully.")
+
+            if self.final_path.is_dir():
+                self.logger.info(f"Re-creating final image from latest layer: {self.final_name}")
+                delete(self.final_path)          # cheap on btrfs
+            else:
+                self.logger.info(f"Creating final image: {self.final_name}")
 
             final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex}"
             final_temp_path = self.containers_dir / final_temp_name
@@ -321,7 +329,7 @@ class Builder:
             else:
                 self.logger.info("Intermediate layers kept")
 
-            self.logger.info(f"Successfully built: {self.final_name}")
+            self.logger.info(f"Successfully built/updated: {self.final_name}")
 
             self._handle_success()
 
