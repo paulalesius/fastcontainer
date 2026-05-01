@@ -254,7 +254,8 @@ class Builder:
                     verbose=self.verbose,
                 ):
                     self.logger.info("Check passed - using cached image")
-                    # fall through → delta build will still run (fast cache hit)
+                    self._handle_success()
+                    return  # Skip delta build entirely: respect the check gate for leaf profiles
                 else:
                     self.logger.warning("Check failed - deleting cache and forcing rebuild")
                     delete(self.final_path)
@@ -262,6 +263,7 @@ class Builder:
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
                 # fall through → delta build will still run (fast cache hit)
+                # (leaf profiles force re-execution of steps to avoid staleness from yaml/cmd changes)
 
         self.logger.info(f"Building profile: {self.profile.name}")
         if self.profile.parent:
