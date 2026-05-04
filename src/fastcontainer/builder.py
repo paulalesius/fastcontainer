@@ -147,9 +147,10 @@ class Builder:
         nice_preview = _preview(step)
 
         if layer_path.is_dir():
-            if self.run_cmd:  # ← leaf profile (the one user actually called with -p)
+            if self.run_cmd:  # leaf profile → alltid tvinga rebuild (för att plocka upp ändringar i yaml/cmd)
                 self.logger.info(f"Step {step.index}/{total_steps} (forced for leaf) {nice_preview}")
-                # force rebuild so new/changed steps in run-*/cmd profiles are never stale
+                self.logger.info(f"  → Raderar gammal layer för att kunna rebuilda rent")
+                delete(layer_path)   # ← VIKTIGT: annars kraschar snapshot(temp, layer_path) med "target exists"
             else:
                 self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
                 return Layer(path=layer_path, hash=step_hash)
@@ -266,6 +267,21 @@ class Builder:
                 # (leaf profiles force re-execution of steps to avoid staleness from yaml/cmd changes)
 
         self.logger.info(f"Building profile: {self.profile.name}")
+
+        # === Städa upp eventuella _*-temp-* som lämnats kvar från avbrutna builds ===
+        temp_prefix = f"_{self.spec.base.effective_name}-temp-"
+        cleaned = 0
+        for p in sorted(self.containers_dir.iterdir()):
+            if p.is_dir() and p.name.startswith(temp_prefix):
+                self.logger.info(f"Cleaning up leftover temp subvolume: {p.name}")
+                try:
+                    delete(p)
+                    cleaned += 1
+                except Exception as e:
+                    self.logger.warning(f"Could not delete {p.name}: {e}")
+        if cleaned:
+            self.logger.info(f"Cleaned up {cleaned} leftover temp subvolume(s)")
+
         if self.profile.parent:
             self.logger.info(f"  extends: {self.profile.parent}")
 
