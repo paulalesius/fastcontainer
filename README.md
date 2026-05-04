@@ -115,7 +115,16 @@ sudo fastcontainer build ... -p default \
   -D CACHE_STORE_DIR=/my/custom/cache
 ```
 
-Variables are supported in `base.create:`, `base.add:`, `add:`, `steps:`, `cmd:`, `check:`, and snippets.
+`{{VAR}}` substitution is now supported **inside `env:` values** (with chaining, any definition order, and `-D` overrides).  
+Variables are also supported in `base.create:`, `base.add:`, `add:`, `steps:`, `cmd:`, `check:`, and snippets.
+
+**Example of `env:` variable chaining:**
+
+```yaml
+env:
+  BASE_DIR: /data/fastcontainer
+  CACHE_DIR: "{{BASE_DIR}}/cache"
+  LOG_DIR: "{{CACHE_DIR}}/logs"
 
 ### Profiles & Inheritance
 

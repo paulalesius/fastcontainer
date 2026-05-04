@@ -528,6 +528,35 @@ class BuildSpec:
         effective_variables = dict(declared_env)
         effective_variables.update(variables)
 
+        # === NEW: support {{VAR}} inside env: values (chaining + any order + -D overrides) ===
+        # Iterative expansion so VAR3 can reference VAR2 which references VAR1, etc.
+        changed = True
+        max_iterations = 20
+        iteration = 0
+        while changed and iteration < max_iterations:
+            changed = False
+            iteration += 1
+            for k, v in list(effective_variables.items()):
+                if isinstance(v, str) and '{{' in v:
+                    try:
+                        new_v = _expand_variables(v, effective_variables, f"env: {k}")
+                        if new_v != v:
+                            effective_variables[k] = new_v
+                            changed = True
+                    except ValueError as e:
+                        raise ValueError(f"Error expanding env variable '{k}': {e}") from e
+        if changed:
+            raise ValueError(
+                "Circular variable reference detected in 'env:' section "
+                "(e.g. A references B and B references A)."
+            )
+        # Final safety check: any {{ left means unresolved cycle
+        for k, v in list(effective_variables.items()):
+            if isinstance(v, str) and '{{' in v:
+                raise ValueError(
+                    f"Circular or unresolved variable reference in env: '{k}' = {v!r}"
+                )
+
         base_raw = spec_raw.get("base")
         if base_raw is None:
             raise ValueError("No 'base:' section found after resolving imports")
