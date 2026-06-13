@@ -19,7 +19,7 @@ class Builder:
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
                  prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
                  post_build_cmd: List[str] | str | None = None,
-                 run_cmd: bool = True, shell: bool = False):
+                 run_cmd: bool = True, shell: bool = False, boot: bool = False):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
@@ -29,6 +29,7 @@ class Builder:
         self.post_build_cmd = post_build_cmd
         self.run_cmd = run_cmd
         self.shell = shell
+        self.boot = boot
 
         self.cmd_user = getattr(profile, 'cmd_user', 'root')
 
@@ -41,14 +42,17 @@ class Builder:
         """Run post-build command (always shows output)."""
         if not cmd:
             return
+
+        mode = " (booted)" if self.boot else ""
         # Post-build cmd: always ephemeral (changes are thrown away)
-        self.logger.info(f"Running profile command (cmd({self.cmd_user}))")
+        self.logger.info(f"Running profile command (cmd({self.cmd_user})) {mode}")
         exec_in_container(
             root=self.final_path,
             command=cmd,
             nspawn_template=self.profile.nspawn,
             user=self.cmd_user,
             ephemeral=True,
+            boot=self.boot,
         )
         self.logger.info("Post-build command finished")
 
@@ -75,6 +79,7 @@ class Builder:
                     quiet=False,
                     check=False,
                     user=self.cmd_user,
+                    boot=self.boot,
                 )
             except Exception as shell_err:
                 self.logger.warning(f"Shell session had an error: {shell_err}")
@@ -239,6 +244,7 @@ class Builder:
             post_build_cmd=None,
             run_cmd=False,
             shell=self.shell,
+            boot=self.boot,
         )
         # no cmd_user needed for parents (we only care about it in leaf profiles)
         parent_builder.build()

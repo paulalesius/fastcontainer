@@ -15,8 +15,11 @@ def _prepare_nspawn_args(
     quiet: bool = True,
     user: str = "root",
     ephemeral: bool = False,
+    boot: bool = False,
 ) -> List[str]:
-    """Prepare systemd-nspawn arguments with AUTOMATIC -D root + --user injection."""
+    """Prepare systemd-nspawn arguments with AUTOMATIC -D root + --user injection.
+    Supports --ephemeral and --boot for final cmd/shell execution.
+    """
     # Clean any stray manual directory flags
     cleaned = []
     i = 0
@@ -37,6 +40,9 @@ def _prepare_nspawn_args(
 
     if ephemeral:
         args.append("--ephemeral")
+
+    if boot:
+        args.append("--boot")
 
     # NEW: inject --user for this step
     if user and user != "root":
@@ -76,12 +82,13 @@ def exec_in_container(
     check: bool = True,
     user: str = "root",
     ephemeral: bool = False,
+    boot: bool = False
 ) -> None:
     """Run a command inside an existing container (post-build or `fastcontainer exec`)."""
     if command is None or (isinstance(command, (list, str)) and not command):
         return
 
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="fastcontainer-exec", quiet=quiet, user=user)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="fastcontainer-exec", quiet=quiet, user=user, ephemeral=ephemeral, boot=boot)
 
     if isinstance(command, str):
         strict_script = f"set -eo pipefail\n{command}"
@@ -104,7 +111,7 @@ def check_in_container(
     strict_script = f"set -eo pipefail\n{command}"
 
     # Check deliberately does NOT use --quiet so failure output is visible
-    args = _prepare_nspawn_args(root, nspawn_template, hostname="check", quiet=False, ephemeral=False)
+    args = _prepare_nspawn_args(root, nspawn_template, hostname="check", quiet=False, ephemeral=False, boot=False)
     args += ["/bin/bash", "-l", "-c", strict_script]
 
     try:

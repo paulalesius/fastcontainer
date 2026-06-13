@@ -55,12 +55,16 @@ def main() -> None:
               help='Define a variable KEY=VALUE for use inside add: flags (repeatable).')
 @click.option('-s', '--shell', 'shell', is_flag=True,
               help="Drop into an interactive shell: on build failure (in the failed temporary layer) OR on success (in the final image instead of running cmd or trailing command).")
+@click.option('-b', '--boot', 'boot', is_flag=True,
+              help="Boot mode: run the final cmd: (or interactive shell with -s) using systemd-nspawn --boot (in addition to --ephemeral). "
+                   "This starts the container as a full machine (init/PID 1). ...")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=False)
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, defines: tuple[str, ...] = (), shell: bool = False, command: tuple[str, ...] = ()) -> None:
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, defines: tuple[str, ...] = (), shell: bool = False, boot: bool = False, command: tuple[str, ...] = ()) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn.
 
     Optional trailing command (after --) will be executed inside the final image.
     With --shell the trailing command is ignored and you get an interactive shell instead.
+    With --boot the final command/shell runs inside a booted ephemeral container (systemd-nspawn --ephemeral --boot ...).
     """
 
     logger = setup_logger(verbose=verbose)
@@ -107,6 +111,7 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
                 post_build_cmd=post_cmd,
                 run_cmd=True,
                 shell=shell,
+                boot=boot,
             )
             builder.build()
     except BlockingIOError:
