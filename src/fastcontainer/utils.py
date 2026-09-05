@@ -7,12 +7,38 @@ import logging
 logger = logging.getLogger("fastcontainer")
 
 
+class CommandFailedError(subprocess.CalledProcessError):
+    """CalledProcessError whose str() carries the captured stderr.
+
+    Plain CalledProcessError.str() (Python < 3.13) omits captured output, so
+    a failing btrfs command would surface as a bare 'returned non-zero exit
+    status N' with no diagnostics at all.
+    """
+
+    def __str__(self):
+        base = super().__str__()
+        if self.stderr:
+            return f"{base} | stderr: {self.stderr.rstrip()}"
+        return base
+
+
 def run(
     cmd: List[str],
 ) -> None:
-    """Execute internal command (btrfs, etc.). Always silent on success."""
+    """Execute internal command (btrfs, etc.). Silent on success; on failure
+    the command's stderr is attached to the raised error so btrfs errors are
+    visible to the user instead of being swallowed."""
     logger.debug("-> " + " ".join(map(str, cmd)))
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    proc = subprocess.run(
+        cmd,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise CommandFailedError(proc.returncode, cmd, stderr=stderr or None)
 
 
 def run_and_capture(

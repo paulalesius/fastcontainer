@@ -7,6 +7,7 @@ layout, manifests, and the recorded execution plan.
 import hashlib
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -361,6 +362,45 @@ profiles:
         final = final_path(store_dir, spec.base.effective_name, name,
                            spec.profiles[name].fingerprint)
         assert final.is_dir(), name
+
+
+def test_layer_user_change_forces_layer_rebuild(tmp_path, store_dir):
+    # A2 regression: step.user was missing from the layer hash, so changing a
+    # parent-profile step's user silently reused the layer built as the old
+    # user (non-leaf layers are cached, not force-rebuilt).
+    def make(user: str, name: str) -> Path:
+        return write_yaml(tmp_path, f"""\
+base:
+  name: testbase
+  create: "echo base"
+profiles:
+  parent:
+    steps:
+      - RUN({user}): echo payload
+  child:
+    extend: parent
+    steps:
+      - RUN: echo extra
+""", name)
+
+    ex1 = RecordingExecutor()
+    do_build(store_dir, make("bob", "y1.yaml"), "child", executor=ex1)
+    assert any(c[0] == "execute" and c[1] == "bob" and c[2].strip() == "echo payload"
+               for c in ex1.calls)
+
+    # changing the step's user must re-execute the layer as the new user
+    ex2 = RecordingExecutor()
+    do_build(store_dir, make("root", "y2.yaml"), "child", executor=ex2)
+    payload_runs = [c for c in ex2.calls
+                    if c[0] == "execute" and c[2].strip() == "echo payload"]
+    assert payload_runs, "changing step.user must invalidate the layer cache"
+    assert payload_runs[0][1] == "root"
+
+    # control: an unchanged rebuild still hits the non-leaf layer cache
+    ex3 = RecordingExecutor()
+    do_build(store_dir, make("root", "y3.yaml"), "child", executor=ex3)
+    assert not any(c[0] == "execute" and c[2].strip() == "echo payload" for c in ex3.calls), \
+        "unchanged non-leaf layer must stay cached"
 
 
 def test_extend_inherits_and_removes_nspawn_flags(tmp_path):

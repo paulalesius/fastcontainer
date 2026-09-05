@@ -111,8 +111,8 @@ class Builder:
             self.executor.create_base(temp_path, self.spec.base.create_cmd, verbose=self.verbose)
             self.backstore.snapshot(temp_path, base_path)
             self.logger.info(f"Base {self.spec.base.effective_name} created successfully")
-        except Exception:
-            self.logger.error("Base creation failed")
+        except Exception as exc:
+            self.logger.error(f"Base creation failed: {exc}")
             raise
         finally:
             if temp_path.is_dir():
@@ -144,11 +144,12 @@ class Builder:
             return f"{step_type}{user_part}: {preview}"
 
         nspawn_context = "\n".join(self.profile.nspawn)
-        content = (
-            previous.hash.encode()
-            + step.cmd.encode("utf-8")
-            + nspawn_context.encode("utf-8")
-        )
+        # step.user is part of the layer key: the same command run as a
+        # different user is a different layer (NspawnProfile.fingerprint
+        # already includes step.user - the layer hash must agree, otherwise
+        # a parent-profile step whose user changed would silently reuse the
+        # layer built as the old user).
+        content = "\n".join((previous.hash, step.user, step.cmd, nspawn_context)).encode("utf-8")
         step_hash = hashlib.sha1(content).hexdigest()
         layer_path = self._layer_path(step_hash)
 

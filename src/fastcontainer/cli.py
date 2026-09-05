@@ -2,6 +2,7 @@
 fastcontainer CLI — build
 """
 import fcntl
+import os
 import shutil
 import sys
 import tempfile
@@ -18,21 +19,25 @@ from .models import BuildSpec
 
 @contextmanager
 def acquire_build_lock(containers_dir: Path):
-    """Exclusive lock so only one build runs at a time."""
+    """Exclusive lock so only one build runs at a time.
+
+    The lock is a flock on a long-lived file and the file is *never removed*:
+    if a blocked process unlinked it, a third process could create and lock a
+    different file while the original holder still had its lock, so two builds
+    could run concurrently in the same store. A stale lock file is harmless -
+    flock is held per open file description, and the next build simply locks
+    the same file again.
+    """
     lock_path = containers_dir / ".fastcontainer.lock"
-    lock_fd = None
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        lock_fd = open(lock_path, "w")
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield lock_fd
     finally:
-        if lock_fd is not None:
-            try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
-                lock_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:

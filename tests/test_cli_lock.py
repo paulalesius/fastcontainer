@@ -20,16 +20,34 @@ class TestBuildLock:
                 with acquire_build_lock(d):
                     pass
 
-    def test_lock_released_after_block(self, tmp_path):
+    def test_lock_is_released_and_reacquirable(self, tmp_path):
         d = tmp_path / "store"
         d.mkdir()
         with acquire_build_lock(d):
             pass
-        # released + cleaned up, and re-acquirable
-        assert not (d / ".fastcontainer.lock").exists()
+        # released and immediately re-acquirable (the lock file itself is
+        # intentionally kept - flock is held per open file description, so a
+        # stale file is harmless and removing it is what broke the lock)
         with acquire_build_lock(d):
             pass
-        assert not (d / ".fastcontainer.lock").exists()
+        with acquire_build_lock(d):
+            pass
+
+    def test_failed_lock_attempt_does_not_touch_lock_file(self, tmp_path):
+        # A1 regression: a blocked contender must not remove the lock file.
+        # Unlinking it while another process holds the lock lets a third
+        # process create and lock a *different* file, so two builds could run
+        # concurrently in the same store.
+        d = tmp_path / "store"
+        d.mkdir()
+        lock = d / ".fastcontainer.lock"
+        with acquire_build_lock(d):
+            assert lock.exists()
+            with pytest.raises(BlockingIOError):
+                with acquire_build_lock(d):
+                    pass
+            # the blocked attempt must NOT have removed the holder's lock file
+            assert lock.exists()
 
     def test_lock_file_created_inside_store(self, tmp_path):
         d = tmp_path / "store"
