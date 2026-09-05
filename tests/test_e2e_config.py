@@ -615,20 +615,21 @@ def test_check_gate_cache_hit_on_second_build(tmp_path, store_dir):
     assert len([c for c in ex.calls if c[0] == "check"]) == 1
 
 
-def test_check_gate_failure_recreates_final_from_cache(tmp_path, store_dir):
+def test_check_gate_failure_deep_rebuilds_all_steps(tmp_path, store_dir):
     yaml_path = write_yaml(tmp_path, WEB_YAML)
     ex = RecordingExecutor(check_result=True)
     do_build(store_dir, yaml_path, "web", executor=ex)
     n_after_first = len([c for c in ex.calls if c[0] == "execute"])
+    assert n_after_first == 2
 
     ex.check_result = False  # simulate a failing check on the second build
     do_build(store_dir, yaml_path, "web", executor=ex)
-    # Layers are content-addressed: the failing check deletes the final image,
-    # but the rebuild re-creates it from the cached layers without re-executing
-    # any step.
-    assert len([c for c in ex.calls if c[0] == "execute"]) == n_after_first
+    # A failing check means the cached image is not to be trusted: the final
+    # image is deleted and every step is re-executed from scratch, ignoring
+    # the layer cache - even though nothing in the yaml changed.
+    assert len([c for c in ex.calls if c[0] == "execute"]) == n_after_first + 2
     assert len([c for c in ex.calls if c[0] == "check"]) == 1
-    # final image exists again after the rebuild
+    # final image exists again after the deep rebuild
     spec = BuildSpec.from_yaml(yaml_path)
     final = final_path(store_dir, spec.base.effective_name, "web", spec.profiles["web"].fingerprint)
     assert final.is_dir()
@@ -697,9 +698,10 @@ class _DeleteRecordingBackstore(DirBackstore):
 
 def test_check_failure_rebuilds_profile_and_descendant(tmp_path, store_dir):
     """Failing check: (non-zero exit) on 'common' while building 'app':
-    the parent's final image is deleted and re-created, and so is the
-    child's final image ("that profile and onward"). Unchanged steps are
-    not re-executed - the re-creation is served from the layer cache."""
+    the parent deep-rebuilds (its final image is deleted and its step is
+    re-executed from scratch) and the child 'app' deep-rebuilds too - its
+    cached layers sit on top of the parent's old layers, so "that profile
+    and onward" is re-executed, not re-created from the layer cache."""
     yaml_path = write_yaml(tmp_path, _chain_yaml(with_child_check=False))
     bs = _DeleteRecordingBackstore()
     ex = RecordingExecutor()
@@ -724,8 +726,12 @@ def test_check_failure_rebuilds_profile_and_descendant(tmp_path, store_dir):
     assert common_final in bs.deleted
     assert app_final in bs.deleted
     assert common_final.is_dir() and app_final.is_dir()
-    # no step re-execution: the rebuild is served from the layer cache
-    assert len([c for c in ex.calls if c[0] == "execute"]) == n_exec
+    # deep rebuild: the parent's step and the child's step are both
+    # re-executed from scratch (the layer cache is not trusted)
+    re_executed = [c for c in ex.calls if c[0] == "execute"][n_exec:]
+    assert [c[2] for c in re_executed] == ['echo "common step"', 'echo "app step"']
+    # the deleted layer cache was re-created by the re-executed steps
+    assert len(layer_names(store_dir, eff)) == 2
     m = json.loads((app_final / "fastcontainer.json").read_text())
     assert m["stage"] == "final" and m["profile"] == "app"
 
@@ -733,8 +739,8 @@ def test_check_failure_rebuilds_profile_and_descendant(tmp_path, store_dir):
 def test_check_failure_cascades_down_the_checking_chain(tmp_path, store_dir):
     """Both profiles have a check: and both now fail while building 'app':
     the child's gate runs first and deletes the child's final, then the
-    parent's gate runs, fails and deletes the parent's final; both finals
-    are re-created from their (cached) layers."""
+    parent's gate runs, fails and deletes the parent's final; both profiles
+    deep-rebuild - every step in the chain is re-executed from scratch."""
     yaml_path = write_yaml(tmp_path, _chain_yaml(with_child_check=True))
     bs = _DeleteRecordingBackstore()
     ex = RecordingExecutor()
@@ -756,7 +762,52 @@ def test_check_failure_cascades_down_the_checking_chain(tmp_path, store_dir):
     assert "test -f /etc/common-ready" in checks[1][1]
     assert common_final in bs.deleted and app_final in bs.deleted
     assert common_final.is_dir() and app_final.is_dir()
-    assert len([c for c in ex.calls if c[0] == "execute"]) == n_exec
+    # deep rebuild: one step per profile re-executed, parent first
+    re_executed = [c for c in ex.calls if c[0] == "execute"][n_exec:]
+    assert [c[2] for c in re_executed] == ['echo "common step"', 'echo "app step"']
+
+
+def test_check_failure_propagates_through_three_level_chain(tmp_path, store_dir):
+    """Three-level chain (common <- app <- top): a failing check: on the
+    middle profile deep-rebuilds the middle profile AND both profiles above
+    it - propagation is recursive, not just direct parent -> child."""
+    yaml = (
+        "base:\n"
+        "  name: testbase\n"
+        "  create: |\n"
+        '    echo "simulated debootstrap"\n'
+        "\n"
+        "profiles:\n"
+        "  common:\n"
+        "    steps:\n"
+        '      - RUN: echo "common step"\n'
+        "    check: |\n"
+        "      test -f /etc/common-ready\n"
+        "  app:\n"
+        "    extend: common\n"
+        "    steps:\n"
+        '      - RUN: echo "app step"\n'
+        "  top:\n"
+        "    extend: app\n"
+        "    steps:\n"
+        '      - RUN: echo "top step"\n'
+    )
+    yaml_path = write_yaml(tmp_path, yaml)
+    bs = _DeleteRecordingBackstore()
+    ex = RecordingExecutor()
+    do_build(store_dir, yaml_path, "top", executor=ex, backstore=bs)
+    n_exec = len([c for c in ex.calls if c[0] == "execute"])
+    assert n_exec == 3  # one step per profile, first build
+
+    ex.check_result = False  # the middle profile's check now exits non-zero
+    do_build(store_dir, yaml_path, "top", executor=ex, backstore=bs)
+
+    checks = [c for c in ex.calls if c[0] == "check"]
+    assert len(checks) == 1
+    assert "test -f /etc/common-ready" in checks[0][1]
+    # deep rebuild propagates up the whole chain: middle, then app, then top
+    re_executed = [c for c in ex.calls if c[0] == "execute"][n_exec:]
+    assert [c[2] for c in re_executed] == ['echo "common step"', 'echo "app step"', 'echo "top step"']
 
 
 class _PerCheckExecutor(RecordingExecutor):

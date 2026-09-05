@@ -264,7 +264,7 @@ Builds are incremental and every artifact is content-addressed:
 
 - **Layer cache.** Each step's layer is hashed from the previous layer's hash, the step command, the step user and the effective nspawn flags. An unchanged step reuses its cached layer; changing a command, a user, or any earlier step rebuilds that step and everything after it.
 - **Final fingerprint.** The `<40hex_fingerprint>` covers every step (command + user), the nspawn flags, `check:` and `cmd:` / `cmd(user):`.
-- **`check:` gate.** When the final image already exists and the profile defines `check:`, the check runs inside the cached image. Pass → the image is reused as-is and no steps re-run. Fail → the cached image is deleted and re-created from the layer cache (steps re-execute only if their inputs actually changed). Without `check:`, an existing image is always re-created from its (cached) layers.
+- **`check:` gate.** When the final image already exists and the profile defines `check:`, the check runs in an ephemeral copy of the cached image (it can never modify it). Pass → the image is reused as-is and no steps re-run. Fail → the cached image is deleted and the profile is **deep-rebuilt**: every step of that profile is re-executed from scratch, ignoring the layer cache, and so is every profile that extends it (its cached layers sit on top of the changed ones). Without `check:`, an existing image is always re-created from its (cached) layers.
 - **`--prune`** deletes only the intermediate layers used by this build; layers belonging to other profiles of the same base are kept.
 
 ### Other features

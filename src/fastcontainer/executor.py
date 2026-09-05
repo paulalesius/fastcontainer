@@ -117,7 +117,8 @@ class Executor(ABC):
 
     @abstractmethod
     def check(self, root: Path, command: str, nspawn: List[str], verbose: bool = False) -> bool:
-        """Run a check snippet in an existing container. True = pass (no rebuild)."""
+        """Run a check snippet in the container (ephemeral: never modifies the image).
+        True = pass (no rebuild)."""
 
 
 class RecordingExecutor(Executor):
@@ -220,7 +221,8 @@ class NspawnExecutor(Executor):
         subprocess.run(full_cmd, check=check)
 
     def check(self, root: Path, command: str, nspawn: List[str], verbose: bool = False) -> bool:
-        """Run a check snippet inside an existing container.
+        """Run a check snippet in an ephemeral copy of the container.
+        The cached image is never modified.
         Returns True if exit code == 0, False otherwise.
         """
         if not command or not command.strip():
@@ -228,8 +230,10 @@ class NspawnExecutor(Executor):
 
         strict_script = f"set -eo pipefail\n{command}"
 
-        # Check deliberately does NOT use --quiet so failure output is visible
-        args = _prepare_nspawn_args(root, nspawn, hostname="check", quiet=False, ephemeral=False, boot=False)
+        # Check deliberately does NOT use --quiet so failure output is visible.
+        # It runs in an ephemeral container: a check validates the cached image
+        # and must never be able to modify it.
+        args = _prepare_nspawn_args(root, nspawn, hostname="check", quiet=False, ephemeral=True, boot=False)
         args += ["/bin/bash", "-l", "-c", strict_script]
 
         try:

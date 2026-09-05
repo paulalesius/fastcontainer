@@ -36,6 +36,10 @@ class Builder:
         # Layers this build created or reused (see _build_layer). --prune only
         # ever touches these, so other profiles of the same base keep their cache.
         self._layers_touched: set[Path] = set()
+        # Set when a check: gate fails: the layer cache of this profile is not
+        # trusted, so every step is re-executed from scratch (deep rebuild).
+        # Propagates down the extend-chain via _ensure_parent_built().
+        self._force_rebuild: bool = False
 
         self.cmd_user = getattr(profile, 'cmd_user', 'root')
 
@@ -153,7 +157,7 @@ class Builder:
 
         nice_preview = _preview(step)
 
-        if layer_path.is_dir():
+        if layer_path.is_dir() and not self._force_rebuild:
             # Layers are content-addressed (the hash covers the previous layer,
             # the command, the user and the nspawn flags), so a cache hit is
             # always correct - leaf profiles included. Any yaml change that
@@ -162,7 +166,14 @@ class Builder:
             self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
             return Layer(path=layer_path, hash=step_hash)
 
-        self.logger.info(f"Step {step.index}/{total_steps} {nice_preview}")
+        if layer_path.is_dir():
+            # Deep rebuild (a check: gate failed in this profile or an ancestor):
+            # the cached layer is not trusted - delete it and re-execute the step
+            # from scratch below.
+            self.logger.info(f"Step {step.index}/{total_steps} (forced re-execute) {nice_preview}")
+            self.backstore.delete(layer_path)
+        else:
+            self.logger.info(f"Step {step.index}/{total_steps} {nice_preview}")
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
@@ -231,10 +242,13 @@ class Builder:
             return None
         return self.post_build_cmd if self.post_build_cmd is not None else self.profile.cmd
 
-    def _ensure_parent_built(self) -> None:
-        """Recursively ensure the extended parent profile is built."""
+    def _ensure_parent_built(self) -> bool:
+        """Recursively ensure the extended parent profile is built.
+        Returns True if the parent deep-rebuilt (its own check: gate failed):
+        the child's cached layers sit on top of the parent's old layers, so the
+        child must re-execute its steps too ("that profile and onward")."""
         if not self.profile.parent:
-            return
+            return False
         parent_profile = self.spec.profiles[self.profile.parent]
         self.logger.info(f"Building parent profile: {parent_profile.name}")
         parent_builder = Builder(
@@ -252,10 +266,18 @@ class Builder:
             executor=self.executor,
         )
         # no cmd_user needed for parents (we only care about it in leaf profiles)
-        parent_builder.build()
+        parent_forced = parent_builder.build()
         self.logger.info(f"Parent '{parent_profile.name}' ready")
+        return parent_forced
 
-    def build(self) -> None:
+    def build(self) -> bool:
+        """Build the profile.
+
+        Returns True if a check: gate failed and the profile was deep-rebuilt
+        (every step re-executed from scratch, ignoring the layer cache).
+        Profiles extending a deep-rebuilt parent deep-rebuild as well.
+        """
+        self._force_rebuild = False
         if self.final_path.is_dir():
             if self.profile.check:
                 self.logger.info(f"Image exists: {self.final_name} - running check")
@@ -267,10 +289,15 @@ class Builder:
                 ):
                     self.logger.info("Check passed - using cached image")
                     self._handle_success()
-                    return  # Skip delta build entirely: respect the check gate for leaf profiles
+                    return False  # Skip delta build entirely: respect the check gate for leaf profiles
                 else:
-                    self.logger.warning("Check failed - deleting cache and forcing rebuild")
+                    self.logger.warning(
+                        "Check failed - deleting the cached image and deep-rebuilding: "
+                        "every step of this profile (and of every profile extending it) "
+                        "is re-executed from scratch, ignoring the layer cache"
+                    )
                     self.backstore.delete(self.final_path)
+                    self._force_rebuild = True
 
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
@@ -307,7 +334,15 @@ class Builder:
         self._ensure_base_exists()
 
         if self.profile.parent:
-            self._ensure_parent_built()
+            if self._ensure_parent_built():
+                # The parent deep-rebuilt (its check: gate failed): our cached
+                # layers were built on top of the parent's old layers, so they
+                # are stale too - deep-rebuild our steps as well.
+                self.logger.warning(
+                    f"Parent profile was deep-rebuilt - deep-rebuilding "
+                    f"'{self.profile.name}' as well"
+                )
+                self._force_rebuild = True
             parent_profile = self.spec.profiles[self.profile.parent]
             parent_final_name = f"{self.spec.base.effective_name}-{parent_profile.name}-{parent_profile.fingerprint}"
             parent_final_path = self.containers_dir / parent_final_name
@@ -369,6 +404,7 @@ class Builder:
             self.logger.info(f"Successfully built/updated: {self.final_name}")
 
             self._handle_success()
+            return self._force_rebuild
 
     def _prune_intermediates(self) -> None:
         # Prune only the layers this build used. The store may hold layers of

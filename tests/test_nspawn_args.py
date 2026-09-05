@@ -141,9 +141,13 @@ class TestNspawnExecutor:
         import fastcontainer.executor as fx
         fx.run_and_capture = ok
         assert ex.check(ROOT, "test -f /x", ["systemd-nspawn"]) is True
-        # check does not use --quiet (failure output must stay visible)
+        # check does not use --quiet (failure output must stay visible) and
+        # runs in an ephemeral container: it validates the cached image and
+        # must never be able to modify it
         (cmd, _), = rec["run_and_capture"]
         assert "--quiet" not in cmd
+        assert "--ephemeral" in cmd
+        assert "--boot" not in cmd
 
         def fail(cmd, verbose=False, cwd=None):
             raise subprocess.CalledProcessError(1, cmd, "boom")
