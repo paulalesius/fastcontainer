@@ -5,9 +5,8 @@ from pathlib import Path
 from typing import Any, List
 
 from .models import BuildSpec, Layer, Manifest, Step, NspawnProfile
-from .btrfs import snapshot, delete, create
-from .nspawn import execute, exec_in_container, check_in_container
-from .utils import run_and_capture
+from .backstore import Backstore, BtrfsBackstore
+from .executor import Executor, NspawnExecutor
 
 import logging
 logger = logging.getLogger("fastcontainer")
@@ -19,7 +18,8 @@ class Builder:
     def __init__(self, containers_dir: Path, spec: BuildSpec, profile: NspawnProfile,
                  prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
                  post_build_cmd: List[str] | str | None = None,
-                 run_cmd: bool = True, shell: bool = False, boot: bool = False):
+                 run_cmd: bool = True, shell: bool = False, boot: bool = False,
+                 backstore: Backstore | None = None, executor: Executor | None = None):
         self.containers_dir = containers_dir.resolve()
         self.spec = spec
         self.profile = profile
@@ -30,6 +30,9 @@ class Builder:
         self.run_cmd = run_cmd
         self.shell = shell
         self.boot = boot
+        # Storage + execution backends (inject fakes for tests / --dry-run)
+        self.backstore = backstore or BtrfsBackstore()
+        self.executor = executor or NspawnExecutor()
 
         self.cmd_user = getattr(profile, 'cmd_user', 'root')
 
@@ -46,10 +49,10 @@ class Builder:
         mode = " (booted)" if self.boot else ""
         # Post-build cmd: always ephemeral (changes are thrown away)
         self.logger.info(f"Running profile command (cmd({self.cmd_user})) {mode}")
-        exec_in_container(
+        self.executor.exec_in(
             root=self.final_path,
             command=cmd,
-            nspawn_template=self.profile.nspawn,
+            nspawn=self.profile.nspawn,
             user=self.cmd_user,
             ephemeral=True,
             boot=self.boot,
@@ -72,10 +75,10 @@ class Builder:
             self.logger.info("═" * 80 + "\n")
 
             try:
-                exec_in_container(
+                self.executor.exec_in(
                     root=self.final_path,
                     command=["/bin/bash", "-l"],
-                    nspawn_template=self.profile.nspawn,
+                    nspawn=self.profile.nspawn,
                     quiet=False,
                     check=False,
                     user=self.cmd_user,
@@ -103,17 +106,17 @@ class Builder:
         temp_path = self.containers_dir / temp_name
 
         try:
-            create(temp_path)
+            self.backstore.create(temp_path)
             cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
-            run_and_capture(cmd, verbose=self.verbose, cwd=temp_path)
-            snapshot(temp_path, base_path)
+            self.executor.create_base(temp_path, self.spec.base.create_cmd, verbose=self.verbose)
+            self.backstore.snapshot(temp_path, base_path)
             self.logger.info(f"Base {self.spec.base.effective_name} created successfully")
         except Exception:
             self.logger.error("Base creation failed")
             raise
         finally:
             if temp_path.is_dir():
-                delete(temp_path)
+                self.backstore.delete(temp_path)
 
     def _layer_path(self, step_hash: str) -> Path:
         return self.containers_dir / f"__{self.spec.base.effective_name}-{step_hash}"
@@ -155,7 +158,7 @@ class Builder:
             if self.run_cmd:  # leaf profile → alltid tvinga rebuild (för att plocka upp ändringar i yaml/cmd)
                 self.logger.info(f"Step {step.index}/{total_steps} (forced for leaf) {nice_preview}")
                 self.logger.info(f"  → Raderar gammal layer för att kunna rebuilda rent")
-                delete(layer_path)   # ← VIKTIGT: annars kraschar snapshot(temp, layer_path) med "target exists"
+                self.backstore.delete(layer_path)   # ← VIKTIGT: annars kraschar snapshot(temp, layer_path) med "target exists"
             else:
                 self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
                 return Layer(path=layer_path, hash=step_hash)
@@ -166,9 +169,9 @@ class Builder:
         temp_path = self.containers_dir / temp_name
 
         try:
-            snapshot(previous.path, temp_path)
+            self.backstore.snapshot(previous.path, temp_path)
 
-            output = execute(temp_path, step.cmd, self.profile.nspawn, user=step.user, verbose=self.verbose)
+            output = self.executor.execute(temp_path, step.cmd, self.profile.nspawn, user=step.user, verbose=self.verbose)
 
             current_logs[f"{step.index:03d}"] = {
                 "command": step.cmd,
@@ -187,7 +190,7 @@ class Builder:
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest.to_dict(), f, indent=2)
 
-            snapshot(temp_path, layer_path)
+            self.backstore.snapshot(temp_path, layer_path)
             return Layer(path=layer_path, hash=step_hash)
 
         except Exception as e:  # CalledProcessError from a failing RUN step
@@ -200,10 +203,10 @@ class Builder:
                 self.logger.info("═" * 80 + "\n")
 
                 try:
-                    exec_in_container(
+                    self.executor.exec_in(
                         root=temp_path,
                         command=["/bin/bash", "-l"],
-                        nspawn_template=self.profile.nspawn,
+                        nspawn=self.profile.nspawn,
                         quiet=False,
                         check=False,
                         user=step.user, # Run debug shell as the user of the failing build step
@@ -218,7 +221,7 @@ class Builder:
 
         finally:
             if temp_path.is_dir():
-                delete(temp_path)
+                self.backstore.delete(temp_path)
 
     def _get_cmd_to_run(self) -> List[str] | str | None:
         """Only the leaf profile (or explicit CLI post-command) runs a cmd:.
@@ -245,6 +248,8 @@ class Builder:
             run_cmd=False,
             shell=self.shell,
             boot=self.boot,
+            backstore=self.backstore,
+            executor=self.executor,
         )
         # no cmd_user needed for parents (we only care about it in leaf profiles)
         parent_builder.build()
@@ -254,10 +259,10 @@ class Builder:
         if self.final_path.is_dir():
             if self.profile.check:
                 self.logger.info(f"Image exists: {self.final_name} - running check")
-                if check_in_container(
+                if self.executor.check(
                     root=self.final_path,
                     command=self.profile.check,
-                    nspawn_template=self.profile.nspawn,
+                    nspawn=self.profile.nspawn,
                     verbose=self.verbose,
                 ):
                     self.logger.info("Check passed - using cached image")
@@ -265,7 +270,7 @@ class Builder:
                     return  # Skip delta build entirely: respect the check gate for leaf profiles
                 else:
                     self.logger.warning("Check failed - deleting cache and forcing rebuild")
-                    delete(self.final_path)
+                    self.backstore.delete(self.final_path)
 
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
@@ -281,7 +286,7 @@ class Builder:
             if p.is_dir() and p.name.startswith(temp_prefix):
                 self.logger.info(f"Cleaning up leftover temp subvolume: {p.name}")
                 try:
-                    delete(p)
+                    self.backstore.delete(p)
                     cleaned += 1
                 except Exception as e:
                     self.logger.warning(f"Could not delete {p.name}: {e}")
@@ -325,14 +330,14 @@ class Builder:
 
             if self.final_path.is_dir():
                 self.logger.info(f"Re-creating final image from latest layer: {self.final_name}")
-                delete(self.final_path)          # cheap on btrfs
+                self.backstore.delete(self.final_path)          # cheap on btrfs
             else:
                 self.logger.info(f"Creating final image: {self.final_name}")
 
             final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex}"
             final_temp_path = self.containers_dir / final_temp_name
 
-            snapshot(current.path, final_temp_path)
+            self.backstore.snapshot(current.path, final_temp_path)
 
             manifest = Manifest.from_spec(
                 self.spec,
@@ -345,8 +350,8 @@ class Builder:
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest.to_dict(), f, indent=2)
 
-            snapshot(final_temp_path, self.final_path)
-            delete(final_temp_path)
+            self.backstore.snapshot(final_temp_path, self.final_path)
+            self.backstore.delete(final_temp_path)
 
             if self.prune:
                 self._prune_intermediates()
@@ -363,5 +368,5 @@ class Builder:
         for p in sorted(self.containers_dir.iterdir()):
             if (p.is_dir() and p.name.startswith(prefix) and len(p.name) == len(prefix) + 40):
                 if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
-                    delete(p)
+                    self.backstore.delete(p)
         self.logger.info("Intermediate layers pruned")

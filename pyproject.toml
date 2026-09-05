@@ -13,6 +13,9 @@ dependencies = [
 [project.scripts]
 fastcontainer = "fastcontainer.cli:main"
 
+[dependency-groups]
+dev = ["pytest >= 8"]
+
 # ─────────────────────────────────────────────────────────────
 # Proper src-layout configuration (this fixes your uv sync error)
 # ─────────────────────────────────────────────────────────────

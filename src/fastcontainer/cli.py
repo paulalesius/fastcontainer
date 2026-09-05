@@ -1,17 +1,20 @@
 """
 fastcontainer CLI — build
 """
-import os
-import sys
 import fcntl
+import shutil
+import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
 
-from .models import BuildSpec, Manifest
+from .backstore import DirBackstore
 from .builder import Builder
+from .executor import NspawnExecutor, RecordingExecutor
 from .log import setup_logger
-from contextlib import contextmanager
+from .models import BuildSpec
 
 @contextmanager
 def acquire_build_lock(containers_dir: Path):
@@ -58,20 +61,23 @@ def main() -> None:
 @click.option('-b', '--boot', 'boot', is_flag=True,
               help="Boot mode: run the final cmd: (or interactive shell with -s) using systemd-nspawn --boot (in addition to --ephemeral). "
                    "This starts the container as a full machine (init/PID 1). ...")
+@click.option('--dry-run', is_flag=True, default=False,
+              help="Simulate the full build (config parsing, env expansion, profile inheritance, layer plan) "
+                   "without root, btrfs or systemd-nspawn. Nothing is written to the real container store.")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED, required=False)
-def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool, defines: tuple[str, ...] = (), shell: bool = False, boot: bool = False, command: tuple[str, ...] = ()) -> None:
+def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool, prune: bool,
+          defines: tuple[str, ...] = (), shell: bool = False, boot: bool = False,
+          dry_run: bool = False, command: tuple[str, ...] = ()) -> None:
     """Build a container from a prepare.yaml using btrfs subvolumes + nspawn.
 
     Optional trailing command (after --) will be executed inside the final image.
     With --shell the trailing command is ignored and you get an interactive shell instead.
     With --boot the final command/shell runs inside a booted ephemeral container (systemd-nspawn --ephemeral --boot ...).
+    With --dry-run the whole pipeline runs against in-memory fakes: the config is
+    processed exactly as in a real build, but no storage or nspawn commands run.
     """
 
     logger = setup_logger(verbose=verbose)
-
-    if os.geteuid() != 0:
-        logger.error("ERROR: This program must be run as root (use sudo)")
-        sys.exit(1)
 
     variables: dict[str, str] = {}
     for d in defines:
@@ -85,22 +91,56 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
             sys.exit(1)
         variables[key] = value.strip()
 
-    # === Exclusive lock for the entire build ===
+    # === Parse & validate the config before touching the store ===
+    try:
+        spec = BuildSpec.from_yaml(prepare_yaml, variables=variables)
+    except Exception as e:
+        logger.error(f"ERROR: {e}")
+        sys.exit(1)
+
+    if profile not in spec.profiles:
+        if profile == "base":
+            logger.error("ERROR: 'base' is a reserved special profile and cannot be selected")
+        else:
+            logger.error(f"ERROR: Profile '{profile}' not found. Available: {list(spec.profiles.keys())}")
+        sys.exit(1)
+
+    selected_profile = spec.profiles[profile]
+
+    post_cmd = list(command) if command else None
+
+    if dry_run:
+        # Full pipeline simulation: real YAML processing + fakes for storage/execution.
+        # Runs in a private temp dir so the real container store is never touched.
+        workdir = Path(tempfile.mkdtemp(prefix="fastcontainer-dryrun-"))
+        try:
+            dry_executor = RecordingExecutor()
+            builder = Builder(
+                containers_dir=workdir,
+                spec=spec,
+                profile=selected_profile,
+                prune=prune,
+                verbose=verbose,
+                logger=logger,
+                post_build_cmd=post_cmd,
+                run_cmd=True,
+                shell=shell,
+                boot=boot,
+                backstore=DirBackstore(),
+                executor=dry_executor,
+            )
+            builder.build()
+            logger.info(
+                f"\nDRY RUN OK — {len(dry_executor.calls)} simulated operations. "
+                f"The container store was not touched."
+            )
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+        return
+
+    # === Real build: exclusive lock for the entire build ===
     try:
         with acquire_build_lock(containers_dir):
-            spec = BuildSpec.from_yaml(prepare_yaml, variables=variables)
-
-            if profile not in spec.profiles:
-                if profile == "base":
-                    logger.error("ERROR: 'base' is a reserved special profile and cannot be selected")
-                else:
-                    logger.error(f"ERROR: Profile '{profile}' not found. Available: {list(spec.profiles.keys())}")
-                sys.exit(1)
-
-            selected_profile = spec.profiles[profile]
-
-            post_cmd = list(command) if command else None
-
             builder = Builder(
                 containers_dir=containers_dir,
                 spec=spec,
