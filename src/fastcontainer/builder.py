@@ -62,11 +62,6 @@ class Builder:
     def _handle_success(self) -> None:
         """Either run the normal post-build command OR drop into an interactive shell
         (when -s/--shell was passed). Parent profiles never get the shell."""
-        cmd_to_run = self._get_cmd_to_run()
-        if cmd_to_run:
-            self.logger.info(
-                f"→ Running profile command (as {self.cmd_user})"
-            )
         if self.shell and self.run_cmd:
             self.logger.info("\n" + "═" * 80)
             self.logger.info("✅ BUILD SUCCESSFUL — Dropping into interactive shell")
@@ -156,10 +151,10 @@ class Builder:
         nice_preview = _preview(step)
 
         if layer_path.is_dir():
-            if self.run_cmd:  # leaf profile → alltid tvinga rebuild (för att plocka upp ändringar i yaml/cmd)
+            if self.run_cmd:  # leaf profile: always force a rebuild (to pick up changes in yaml/cmd)
                 self.logger.info(f"Step {step.index}/{total_steps} (forced for leaf) {nice_preview}")
-                self.logger.info(f"  → Raderar gammal layer för att kunna rebuilda rent")
-                self.backstore.delete(layer_path)   # ← VIKTIGT: annars kraschar snapshot(temp, layer_path) med "target exists"
+                self.logger.info(f"  → Removing cached layer to rebuild it cleanly")
+                self.backstore.delete(layer_path)   # IMPORTANT: otherwise snapshot(temp, layer_path) crashes with "target exists"
             else:
                 self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
                 return Layer(path=layer_path, hash=step_hash)

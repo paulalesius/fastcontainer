@@ -86,18 +86,13 @@ def _resolve_yaml(yaml_path: Path, visited: set[Path] | None = None) -> dict:
 
 def _forbid_manual_directory(profile_name: str, flags: List[str]) -> None:
     """Completely forbid the user from specifying the root directory."""
-    for i, item in enumerate(flags):
+    for item in flags:
         flag = str(item).strip()
         if flag in ("-D", "--directory") or flag.startswith(("--directory=", "-D=")):
             raise ValueError(
                 f"Profile '{profile_name}': Do NOT specify -D, --directory or any root path.\n"
                 f"fastcontainer automatically adds '-D <root>' for you.\n"
                 f"Remove any such lines from your 'add:' section."
-            )
-        if flag == "-D" and i + 1 < len(flags) and str(flags[i + 1]).strip() == "{{ROOT}}":
-            raise ValueError(
-                f"Profile '{profile_name}': Do NOT specify '-D' and '{{{{ROOT}}}}' anymore.\n"
-                f"fastcontainer now injects the correct directory flag automatically."
             )
 
 

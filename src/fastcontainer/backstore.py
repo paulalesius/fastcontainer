@@ -34,7 +34,7 @@ class Backstore(ABC):
         """Create a (cheap) snapshot copy of *src* at *dst*."""
 
     @abstractmethod
-    def delete(self, path: Path, commit: bool = True) -> None:
+    def delete(self, path: Path) -> None:
         """Delete the storage object at *path* (with a safety check)."""
 
     @abstractmethod
@@ -62,7 +62,7 @@ class DirBackstore(Backstore):
         # "btrfs subvolume snapshot" failing on an existing target.
         shutil.copytree(Path(src), Path(dst))
 
-    def delete(self, path: Path, commit: bool = True) -> None:
+    def delete(self, path: Path) -> None:
         path = Path(path)
         if not path.is_dir():
             logger.warning(f"Skipping delete: {path} is not a directory")
@@ -98,7 +98,7 @@ class BtrfsBackstore(Backstore):
         """Create a btrfs snapshot (silent by default)."""
         run(["btrfs", "subvolume", "snapshot", str(src), str(dst)])
 
-    def delete(self, path: Path, commit: bool = True) -> None:
+    def delete(self, path: Path) -> None:
         """Delete a btrfs subvolume with safety check."""
         path = Path(path).resolve()
 
@@ -112,11 +112,7 @@ class BtrfsBackstore(Backstore):
                 "it is not a btrfs subvolume."
             )
 
-        cmd = ["btrfs", "subvolume", "delete"]
-        if commit:
-            cmd.append("-c")
-        cmd.append(str(path))
-        run(cmd)
+        run(["btrfs", "subvolume", "delete", "-c", str(path)])
 
     def create(self, path: Path) -> None:
         """Create a new empty btrfs subvolume."""
