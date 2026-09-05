@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from fastcontainer.backstore import DirBackstore
 from fastcontainer.executor import RecordingExecutor
 from fastcontainer.models import BuildSpec, Step
 
@@ -650,6 +651,163 @@ profiles:
     do_build(store_dir, yaml_path, "p", executor=ex)
     do_build(store_dir, yaml_path, "p", executor=ex)
     assert len([c for c in ex.calls if c[0] == "execute"]) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check: gate in profile chains (that profile and everything extending it)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _chain_yaml(with_child_check: bool) -> str:
+    """A two-profile chain: 'common' (with a check: gate) and 'app' extending
+    it. The child gets its own check: only when requested."""
+    child_check = (
+        "    check: |\n      test -f /etc/app-ready\n" if with_child_check else ""
+    )
+    return (
+        "base:\n"
+        "  name: testbase\n"
+        "  create: |\n"
+        '    echo "simulated debootstrap"\n'
+        "    mkdir -p /usr\n"
+        "\n"
+        "profiles:\n"
+        "  common:\n"
+        "    steps:\n"
+        '      - RUN: echo "common step"\n'
+        "    check: |\n"
+        "      test -f /etc/common-ready\n"
+        "  app:\n"
+        "    extend: common\n"
+        "    steps:\n"
+        '      - RUN: echo "app step"\n'
+        + child_check
+    )
+
+
+class _DeleteRecordingBackstore(DirBackstore):
+    """DirBackstore that records every delete() call (finals and temps)."""
+
+    def __init__(self) -> None:
+        self.deleted: list[Path] = []
+
+    def delete(self, path: Path) -> None:
+        self.deleted.append(Path(path))
+        super().delete(path)
+
+
+def test_check_failure_rebuilds_profile_and_descendant(tmp_path, store_dir):
+    """Failing check: (non-zero exit) on 'common' while building 'app':
+    the parent's final image is deleted and re-created, and so is the
+    child's final image ("that profile and onward"). Unchanged steps are
+    not re-executed - the re-creation is served from the layer cache."""
+    yaml_path = write_yaml(tmp_path, _chain_yaml(with_child_check=False))
+    bs = _DeleteRecordingBackstore()
+    ex = RecordingExecutor()
+    do_build(store_dir, yaml_path, "app", executor=ex, backstore=bs)
+
+    spec = BuildSpec.from_yaml(yaml_path)
+    eff = spec.base.effective_name
+    common_final = final_path(store_dir, eff, "common", spec.profiles["common"].fingerprint)
+    app_final = final_path(store_dir, eff, "app", spec.profiles["app"].fingerprint)
+    assert common_final.is_dir() and app_final.is_dir()
+    assert not [c for c in ex.calls if c[0] == "check"]  # first build: nothing to check
+    n_exec = len([c for c in ex.calls if c[0] == "execute"])
+
+    ex.check_result = False  # the parent's check now exits non-zero
+    do_build(store_dir, yaml_path, "app", executor=ex, backstore=bs)
+
+    # only the parent's check ran (the child defines none) and it failed
+    checks = [c for c in ex.calls if c[0] == "check"]
+    assert len(checks) == 1
+    assert "test -f /etc/common-ready" in checks[0][1]
+    # both final images were deleted and re-created
+    assert common_final in bs.deleted
+    assert app_final in bs.deleted
+    assert common_final.is_dir() and app_final.is_dir()
+    # no step re-execution: the rebuild is served from the layer cache
+    assert len([c for c in ex.calls if c[0] == "execute"]) == n_exec
+    m = json.loads((app_final / "fastcontainer.json").read_text())
+    assert m["stage"] == "final" and m["profile"] == "app"
+
+
+def test_check_failure_cascades_down_the_checking_chain(tmp_path, store_dir):
+    """Both profiles have a check: and both now fail while building 'app':
+    the child's gate runs first and deletes the child's final, then the
+    parent's gate runs, fails and deletes the parent's final; both finals
+    are re-created from their (cached) layers."""
+    yaml_path = write_yaml(tmp_path, _chain_yaml(with_child_check=True))
+    bs = _DeleteRecordingBackstore()
+    ex = RecordingExecutor()
+    do_build(store_dir, yaml_path, "app", executor=ex, backstore=bs)
+
+    spec = BuildSpec.from_yaml(yaml_path)
+    eff = spec.base.effective_name
+    common_final = final_path(store_dir, eff, "common", spec.profiles["common"].fingerprint)
+    app_final = final_path(store_dir, eff, "app", spec.profiles["app"].fingerprint)
+    n_exec = len([c for c in ex.calls if c[0] == "execute"])
+
+    ex.check_result = False  # both checks now exit non-zero
+    do_build(store_dir, yaml_path, "app", executor=ex, backstore=bs)
+
+    checks = [c for c in ex.calls if c[0] == "check"]
+    assert len(checks) == 2
+    # the child's gate runs before the parent's
+    assert "test -f /etc/app-ready" in checks[0][1]
+    assert "test -f /etc/common-ready" in checks[1][1]
+    assert common_final in bs.deleted and app_final in bs.deleted
+    assert common_final.is_dir() and app_final.is_dir()
+    assert len([c for c in ex.calls if c[0] == "execute"]) == n_exec
+
+
+class _PerCheckExecutor(RecordingExecutor):
+    """RecordingExecutor with a per-check result (substring match on the
+    check command text); the base check_result is the fallback."""
+
+    def __init__(self, results: dict[str, bool], default: bool = True) -> None:
+        super().__init__(check_result=default)
+        self._results = results
+
+    def check(self, root, command: str, nspawn, verbose: bool = False) -> bool:
+        if not command or not command.strip():
+            return True
+        self.calls.append(("check", command))
+        for key, result in self._results.items():
+            if key in command:
+                return result
+        return self.check_result
+
+
+def test_child_check_passing_skips_parent_check(tmp_path, store_dir):
+    """Pins current behaviour (known gap): while the child's check: gate
+    passes, the build reuses the cached child image and returns early - the
+    parent's check: is never evaluated, so a failing parent check neither
+    rebuilds the parent nor the child. If the intended semantics is "any
+    failing check in the chain invalidates the chain", invert this test."""
+    yaml_path = write_yaml(tmp_path, _chain_yaml(with_child_check=True))
+    bs = _DeleteRecordingBackstore()
+    ex = _PerCheckExecutor({
+        "common-ready": False,  # parent's check would exit non-zero
+        "app-ready": True,      # child's check passes
+    })
+    do_build(store_dir, yaml_path, "app", executor=ex, backstore=bs)
+
+    spec = BuildSpec.from_yaml(yaml_path)
+    eff = spec.base.effective_name
+    common_final = final_path(store_dir, eff, "common", spec.profiles["common"].fingerprint)
+    app_final = final_path(store_dir, eff, "app", spec.profiles["app"].fingerprint)
+    n_exec = len([c for c in ex.calls if c[0] == "execute"])
+    n_deleted = len(bs.deleted)
+
+    do_build(store_dir, yaml_path, "app", executor=ex, backstore=bs)
+
+    # only the child's check ran; the parent's failing check went unnoticed
+    checks = [c for c in ex.calls if c[0] == "check"]
+    assert len(checks) == 1
+    assert "test -f /etc/app-ready" in checks[0][1]
+    # nothing was rebuilt: no final deleted, no step re-executed
+    assert len(bs.deleted) == n_deleted
+    assert common_final not in bs.deleted and app_final not in bs.deleted
+    assert len([c for c in ex.calls if c[0] == "execute"]) == n_exec
 
 
 # ─────────────────────────────────────────────────────────────────────────────
