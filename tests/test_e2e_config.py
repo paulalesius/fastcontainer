@@ -276,7 +276,11 @@ profiles:
     _, ex1, _ = do_build(store_dir, write_yaml(tmp_path, yfwd, "fwd.yaml"), "p")
     assert "echo x-y-z" in [c for c in ex1.calls if c[0] == "execute"][0][2]
     _, ex2, _ = do_build(store_dir, write_yaml(tmp_path, yrev, "rev.yaml"), "p")
-    assert "echo x-y-z" in [c for c in ex2.calls if c[0] == "execute"][0][2]
+    # The reversed declaration order must resolve to exactly the same values:
+    # the second build is then a pure cache hit (same fingerprint, same step
+    # hash) and no step re-executes. If resolution ever differed, the step
+    # command would differ and an execute call would appear here.
+    assert [c for c in ex2.calls if c[0] == "execute"] == []
 
 
 def test_undeclared_variable_in_step_errors(tmp_path):
@@ -529,12 +533,26 @@ profiles:
     assert [c[1] for c in execs] == ["root", "ops", "bob"]
 
 
-def test_run_empty_parens_is_silent_noop():
-    # audit bug #6: "RUN()" does not match the step-key regex (the parens must
-    # contain at least one character), so the step silently becomes a no-op
-    # (cmd=None) instead of running as root.
-    s = Step.from_dict({"RUN()": "echo bare"}, 1, {}, "p")
-    assert s.cmd is None
+def test_run_empty_parens_is_error():
+    # audit bug #6 (fixed): "RUN()" / "USE()" with empty parens used to silently
+    # become no-op steps (cmd=None); they are now rejected with a clear error.
+    with pytest.raises(ValueError, match="empty parens"):
+        Step.from_dict({"RUN()": "echo bare"}, 1, {}, "p")
+    with pytest.raises(ValueError, match="empty parens"):
+        Step.from_dict({"USE()": "snippet"}, 2, {}, "p")
+
+
+def test_quoted_step_line_is_rejected():
+    # audit bug D4 (fixed): quoting the whole step line makes YAML parse it as a
+    # plain string; that used to be silently dropped (cmd=None). It is now an
+    # error pointing at the likely cause (extra quotes around the whole line).
+    with pytest.raises(ValueError, match="single string"):
+        Step.from_dict("USE(appuser): dictform", 1, {}, "p")
+    with pytest.raises(ValueError, match="single string"):
+        Step.from_dict('RUN: echo "hi"', 2, {}, "p")
+    # plain strings that are not RUN/USE step lines keep the old no-op behavior
+    s = Step.from_dict("not a dict", 1, {}, "p")
+    assert s.cmd is None and s.raw == "not a dict"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -596,7 +614,7 @@ def test_check_gate_cache_hit_on_second_build(tmp_path, store_dir):
     assert len([c for c in ex.calls if c[0] == "check"]) == 1
 
 
-def test_check_gate_failure_forces_rebuild(tmp_path, store_dir):
+def test_check_gate_failure_recreates_final_from_cache(tmp_path, store_dir):
     yaml_path = write_yaml(tmp_path, WEB_YAML)
     ex = RecordingExecutor(check_result=True)
     do_build(store_dir, yaml_path, "web", executor=ex)
@@ -604,8 +622,12 @@ def test_check_gate_failure_forces_rebuild(tmp_path, store_dir):
 
     ex.check_result = False  # simulate a failing check on the second build
     do_build(store_dir, yaml_path, "web", executor=ex)
-    assert len([c for c in ex.calls if c[0] == "execute"]) > n_after_first
-    # final image exists again after the forced rebuild
+    # Layers are content-addressed: the failing check deletes the final image,
+    # but the rebuild re-creates it from the cached layers without re-executing
+    # any step.
+    assert len([c for c in ex.calls if c[0] == "execute"]) == n_after_first
+    assert len([c for c in ex.calls if c[0] == "check"]) == 1
+    # final image exists again after the rebuild
     spec = BuildSpec.from_yaml(yaml_path)
     final = final_path(store_dir, spec.base.effective_name, "web", spec.profiles["web"].fingerprint)
     assert final.is_dir()
@@ -613,7 +635,6 @@ def test_check_gate_failure_forces_rebuild(tmp_path, store_dir):
     assert m["stage"] == "final"
 
 
-@pytest.mark.xfail(reason="audit bug #2: without a check: gate the leaf profile re-executes every step on every build, even when the unchanged final image already exists (builder._build_layer run_cmd branch)")
 def test_second_build_without_check_is_cached(tmp_path, store_dir):
     yaml = """\
 base:
@@ -740,6 +761,33 @@ def test_no_prune_keeps_layers(tmp_path, store_dir):
     assert len(layer_names(store_dir, b.spec.base.effective_name)) == 2
 
 
+def test_prune_is_scoped_to_the_built_profile(tmp_path, store_dir):
+    # audit bug D5 (fixed): --prune used to delete every __<base>-* layer in the
+    # store, clobbering the layer cache of other profiles of the same base.
+    yaml = """\
+base:
+  name: testbase
+  create: "echo base"
+profiles:
+  p1:
+    steps:
+      - RUN: echo one
+  p2:
+    steps:
+      - RUN: echo two
+"""
+    yaml_path = write_yaml(tmp_path, yaml)
+    spec = BuildSpec.from_yaml(yaml_path)
+    eff = spec.base.effective_name
+    do_build(store_dir, yaml_path, "p1")          # leaves its layer cached
+    layers_p1 = layer_names(store_dir, eff)
+    assert len(layers_p1) == 1
+    do_build(store_dir, yaml_path, "p2", prune=True)
+    remaining = layer_names(store_dir, eff)
+    assert layers_p1[0] in remaining              # p1's layer survived p2's prune
+    assert len(remaining) == 1
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # malformed / edge steps (Step.from_dict)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -778,7 +826,7 @@ profiles:
 # fingerprint semantics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_cmd_is_not_in_fingerprint(tmp_path):
+def test_cmd_is_in_fingerprint(tmp_path):
     base = """\
 base:
   name: testbase
@@ -792,10 +840,9 @@ profiles:
     b = base + "    cmd(appuser): echo B\n"
     spec_a = BuildSpec.from_yaml(write_yaml(tmp_path, a, name="a.yaml"))
     spec_b = BuildSpec.from_yaml(write_yaml(tmp_path, b, name="b.yaml"))
-    # cmd: / cmd_user: do not participate in the fingerprint: changing only the
-    # post-build command leaves the final image name unchanged (the leaf
-    # forced-rebuild still re-creates it at the same path).
-    assert spec_a.profiles["p"].fingerprint == spec_b.profiles["p"].fingerprint
+    # cmd: / cmd_user: participate in the fingerprint: changing only the
+    # post-build command (or its user) yields a different final image name.
+    assert spec_a.profiles["p"].fingerprint != spec_b.profiles["p"].fingerprint
     assert spec_a.profiles["p"].cmd == "echo A"
     assert spec_b.profiles["p"].cmd_user == "appuser"
 

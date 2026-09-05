@@ -296,6 +296,10 @@ class NspawnProfile:
             parts.append(step.user)
         parts.append("\n".join(self.nspawn))
         parts.append(self.check or "")
+        # cmd: / cmd(user): participate in the fingerprint: changing the
+        # post-build command (or its user) yields a different final image name.
+        parts.append(self.cmd if isinstance(self.cmd, str) else "\n".join(self.cmd or []))
+        parts.append(self.cmd_user)
         content = "\n---\n".join(parts).encode("utf-8")
         return hashlib.sha1(content).hexdigest()
 
@@ -380,9 +384,20 @@ class Step:
             snippets = {}
 
         if not isinstance(data, dict) or len(data) != 1:
+            if isinstance(data, str) and re.match(r"\s*(RUN|USE)\b[^:]*:", data):
+                raise ValueError(
+                    f"Profile '{profile_name}' step {index}: got the whole step line as a single string: '{data.strip()}'."
+                    f" A step must be a YAML mapping, e.g. '- RUN(username): |' followed by the command lines."
+                    f" (This usually means the entire line was wrapped in one pair of quotes.)"
+                )
             return cls(index=index, raw=data)
 
         raw_key = next(iter(data.keys()))
+        if isinstance(raw_key, str) and re.fullmatch(r"\s*(RUN|USE)\s*\(\s*\)\s*", raw_key):
+            raise ValueError(
+                f"Profile '{profile_name}' step {index}: step key '{raw_key}' has empty parens."
+                f" Either drop the parens (plain 'RUN'/'USE' runs as root), or name the user, e.g. 'RUN(username)'."
+            )
         cmd_type, user_raw = _parse_step_key(raw_key)
         value = data[raw_key]
 

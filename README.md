@@ -25,7 +25,7 @@ Perfect for machine-learning research, GPU-heavy experiments, and any workflow w
 ### Quick Start
 
 ```bash
-sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-s] [-D KEY=VALUE]... [-- <command...>]
+sudo fastcontainer build <containers_dir> <prepare.yaml> -p <profile> [-v] [--prune] [-s] [-b] [--dry-run] [-D KEY=VALUE]... [-- <command...>]
 ```
 
 ### Per-Step User (`RUN(user):` / `USE(user):` / `cmd(user):`)
@@ -258,15 +258,26 @@ sudo fastcontainer build ... -v
 **Final image name format:**  
 `<effective_base>-<profile>-<40hex_fingerprint>`
 
+### Caching, the `check:` gate and `--prune`
+
+Builds are incremental and every artifact is content-addressed:
+
+- **Layer cache.** Each step's layer is hashed from the previous layer's hash, the step command, the step user and the effective nspawn flags. An unchanged step reuses its cached layer; changing a command, a user, or any earlier step rebuilds that step and everything after it.
+- **Final fingerprint.** The `<40hex_fingerprint>` covers every step (command + user), the nspawn flags, `check:` and `cmd:` / `cmd(user):`.
+- **`check:` gate.** When the final image already exists and the profile defines `check:`, the check runs inside the cached image. Pass → the image is reused as-is and no steps re-run. Fail → the cached image is deleted and re-created from the layer cache (steps re-execute only if their inputs actually changed). Without `check:`, an existing image is always re-created from its (cached) layers.
+- **`--prune`** deletes only the intermediate layers used by this build; layers belonging to other profiles of the same base are kept.
+
 ### Other features
 
 - Per-step users (`RUN(user):`, `USE(user):`, `cmd(user):`) — v0.8.0
 - Base library import via `import-base:` — v0.9.0
 - `-s` / `--shell`: interactive shell on failure **or** success — v0.7.0
-- `--prune`: delete all intermediate layers after a successful build
+- `--prune`: delete the intermediate layers used by this build (other profiles of the same base keep theirs)
 - Automatic build lock (`.fastcontainer.lock`)
 - Every layer contains a `fastcontainer.json` manifest with full build history
 - Reusable `snippets:` + `USE:` syntax
+- `-b` / `--boot`: run the post-build `cmd:` (or the `-s` shell) with `systemd-nspawn --boot` (full machine, init/PID 1)
+- `--dry-run`: run the full pipeline (config parsing, env, inheritance, layer plan) without root, btrfs or nspawn
 
 ### Contributing & Development
 

@@ -33,6 +33,9 @@ class Builder:
         # Storage + execution backends (inject fakes for tests / --dry-run)
         self.backstore = backstore or BtrfsBackstore()
         self.executor = executor or NspawnExecutor()
+        # Layers this build created or reused (see _build_layer). --prune only
+        # ever touches these, so other profiles of the same base keep their cache.
+        self._layers_touched: set[Path] = set()
 
         self.cmd_user = getattr(profile, 'cmd_user', 'root')
 
@@ -151,13 +154,13 @@ class Builder:
         nice_preview = _preview(step)
 
         if layer_path.is_dir():
-            if self.run_cmd:  # leaf profile: always force a rebuild (to pick up changes in yaml/cmd)
-                self.logger.info(f"Step {step.index}/{total_steps} (forced for leaf) {nice_preview}")
-                self.logger.info(f"  → Removing cached layer to rebuild it cleanly")
-                self.backstore.delete(layer_path)   # IMPORTANT: otherwise snapshot(temp, layer_path) crashes with "target exists"
-            else:
-                self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
-                return Layer(path=layer_path, hash=step_hash)
+            # Layers are content-addressed (the hash covers the previous layer,
+            # the command, the user and the nspawn flags), so a cache hit is
+            # always correct - leaf profiles included. Any yaml change that
+            # matters already changed the hash.
+            self._layers_touched.add(layer_path)
+            self.logger.info(f"Step {step.index}/{total_steps} (cached) {nice_preview}")
+            return Layer(path=layer_path, hash=step_hash)
 
         self.logger.info(f"Step {step.index}/{total_steps} {nice_preview}")
 
@@ -187,6 +190,7 @@ class Builder:
                 json.dump(manifest.to_dict(), f, indent=2)
 
             self.backstore.snapshot(temp_path, layer_path)
+            self._layers_touched.add(layer_path)
             return Layer(path=layer_path, hash=step_hash)
 
         except Exception as e:  # CalledProcessError from a failing RUN step
@@ -270,8 +274,9 @@ class Builder:
 
             else:
                 self.logger.info(f"Image already exists: {self.final_name}")
-                # fall through → delta build will still run (fast cache hit)
-                # (leaf profiles force re-execution of steps to avoid staleness from yaml/cmd changes)
+                # fall through → delta build will still run; layers are
+                # content-addressed, so unchanged steps are cache hits and the
+                # final image is re-created from them.
 
         self.logger.info(f"Building profile: {self.profile.name}")
 
@@ -366,10 +371,19 @@ class Builder:
             self._handle_success()
 
     def _prune_intermediates(self) -> None:
-        self.logger.info("Pruning intermediate layers...")
+        # Prune only the layers this build used. The store may hold layers of
+        # other profiles of the same base - those are left alone.
         prefix = f"__{self.spec.base.effective_name}-"
-        for p in sorted(self.containers_dir.iterdir()):
-            if (p.is_dir() and p.name.startswith(prefix) and len(p.name) == len(prefix) + 40):
-                if all(c in "0123456789abcdef" for c in p.name[len(prefix):]):
-                    self.backstore.delete(p)
-        self.logger.info("Intermediate layers pruned")
+        self.logger.info("Pruning intermediate layers used by this build...")
+        pruned = 0
+        for p in sorted(self._layers_touched):
+            well_formed = (
+                p.name.startswith(prefix)
+                and len(p.name) == len(prefix) + 40
+                and all(c in "0123456789abcdef" for c in p.name[len(prefix):])
+            )
+            if not (p.is_dir() and well_formed):
+                continue
+            self.backstore.delete(p)
+            pruned += 1
+        self.logger.info(f"Intermediate layers pruned ({pruned} removed)")

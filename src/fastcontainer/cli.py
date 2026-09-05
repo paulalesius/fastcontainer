@@ -58,7 +58,7 @@ def main() -> None:
               help="Profile name from the YAML 'profiles:' section (required).")
 @click.option('-v', '--verbose', is_flag=True,
               help="Verbose mode: show full output of each build step and internal commands (default: clean progress only).")
-@click.option('--prune', is_flag=True, default=False, help="Prune intermediate layers after successful build.")
+@click.option('--prune', is_flag=True, default=False, help="Prune the intermediate layers used by this build after a successful build.")
 @click.option('-D', '--define', 'defines', multiple=True, metavar='KEY=VALUE',
               help='Define a variable KEY=VALUE for use inside add: flags (repeatable).')
 @click.option('-s', '--shell', 'shell', is_flag=True,
