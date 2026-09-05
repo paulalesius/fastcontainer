@@ -4,11 +4,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, List
 
 import yaml
+
+logger = logging.getLogger("fastcontainer")
 
 
 def _expand_variables(text: str, variables: dict[str, str], context: str) -> str:
@@ -68,6 +71,15 @@ def _resolve_yaml(yaml_path: Path, visited: set[Path] | None = None) -> dict:
                     raw[key] = merged
                 elif local_val is None:
                     raw[key] = imported_val
+
+    # Warn about top-level keys the builder does not know about: without this
+    # they vanish silently (e.g. a typo like 'profilez:' in an imported
+    # library file would be dropped with no trace).
+    for key in sorted(set(raw) - {"base", "profiles", "snippets", "env"}):
+        logger.warning(
+            f"{yaml_path.name}: unrecognized top-level key '{key}' was ignored "
+            f"(expected one of: base, profiles, snippets, env)"
+        )
 
     visited.remove(resolved_path)
     return raw

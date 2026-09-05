@@ -280,11 +280,18 @@ class Builder:
 
         self.logger.info(f"Building profile: {self.profile.name}")
 
-        # === Städa upp eventuella _*-temp-* som lämnats kvar från avbrutna builds ===
-        temp_prefix = f"_{self.spec.base.effective_name}-temp-"
+        # === Clean up leftover temp subvolumes from interrupted builds ===
+        # Every temp dir carries a unique uuid suffix, so anything matching one
+        # of these prefixes is stale by definition (this build creates its own
+        # temps later, with fresh suffixes).
+        stale_prefixes = (
+            f"_{self.spec.base.name}-create-",
+            f"_{self.spec.base.effective_name}-temp-",
+            f"_{self.spec.base.effective_name}-final-",
+        )
         cleaned = 0
         for p in sorted(self.containers_dir.iterdir()):
-            if p.is_dir() and p.name.startswith(temp_prefix):
+            if p.is_dir() and p.name.startswith(stale_prefixes):
                 self.logger.info(f"Cleaning up leftover temp subvolume: {p.name}")
                 try:
                     self.backstore.delete(p)
