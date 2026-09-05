@@ -113,6 +113,27 @@ def _parse_step_key(key: str) -> tuple[str, str | None]:
     return cmd_type, user
 
 
+_NAME_ALLOWED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_container_name(kind: str, name: str) -> None:
+    """Validate a name that becomes a directory name inside the container store.
+
+    Base and profile names are joined into paths under containers_dir, so they
+    must be single path segments: no separators ('/', '\\'), no '..' and no
+    leading '.' or '-'. Validating at parse time makes it impossible for a name
+    to ever point outside the store directory.
+    """
+    if not _NAME_ALLOWED.match(name):
+        raise ValueError(
+            f"Invalid {kind} name: '{name}'.\n"
+            f"  {kind.capitalize()} names become directory names in the container store,\n"
+            f"  so they may only contain letters, digits, '.', '_' and '-',\n"
+            f"  and must start with a letter or digit.\n"
+            f"  (Path separators, '..' and other characters are not allowed.)"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # All the other classes (NspawnProfile, BaseSpec, Step, Layer, Manifest) stay
 # exactly the same as in your current file — only the BuildSpec.from_yaml changes.
@@ -285,9 +306,11 @@ class BaseSpec:
             variables = {}
 
         if isinstance(data, str):
-            if not data.strip():
+            name = data.strip()
+            if not name:
                 raise ValueError("base cannot be empty")
-            return cls(name=data.strip(), effective_name=data.strip())
+            _validate_container_name("base", name)
+            return cls(name=name, effective_name=name)
 
         if isinstance(data, dict):
             name = data.get("name")
@@ -295,6 +318,7 @@ class BaseSpec:
                 raise ValueError("base.name must be a non-empty string")
 
             name = name.strip()
+            _validate_container_name("base", name)
             create_raw = data.get("create")
             create_cmd = None
             effective_name = name
@@ -581,6 +605,14 @@ class BuildSpec:
         local_profiles_raw = spec_raw.pop("profiles", {}) or {}
         if not isinstance(local_profiles_raw, dict):
             raise ValueError("profiles: must be a dictionary")
+
+        # Profile names become part of the final image directory name, so they
+        # must be single path segments too (covers local AND imported profiles,
+        # since the merge already happened).
+        for pname in local_profiles_raw:
+            # (No .strip(): the raw key is what ends up in the path, so the
+            #  exact key must be a safe segment.)
+            _validate_container_name("profile", str(pname))
 
         final_profiles_raw = local_profiles_raw   # the recursive merge already did the work
 

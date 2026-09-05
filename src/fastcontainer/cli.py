@@ -139,6 +139,11 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
                 f"\nDRY RUN OK — {len(dry_executor.calls)} simulated operations. "
                 f"The container store was not touched."
             )
+        except Exception as e:
+            # Same one-line error surface as real builds (e.g. missing base
+            # without a create script) instead of a raw traceback.
+            logger.error(f"ERROR: Dry run failed: {e}")
+            sys.exit(1)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
         return
