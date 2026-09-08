@@ -947,8 +947,9 @@ profiles:
 """
     _, ex, _ = do_build(store_dir, write_yaml(tmp_path, yaml), "p", shell=True)
     exec_in = [c for c in ex.calls if c[0] == "exec_in"]
-    # -s drops into an interactive shell instead of running the profile cmd
-    assert exec_in == [("exec_in", "appuser", ["/bin/bash", "-l"], False, False)]
+    # -s drops into an interactive shell instead of running the profile cmd;
+    # ephemeral, so the shell can never modify the final image
+    assert exec_in == [("exec_in", "appuser", ["/bin/bash", "-l"], True, False)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -74,8 +74,12 @@ class Builder:
             self.logger.info("✅ BUILD SUCCESSFUL — Dropping into interactive shell")
             self.logger.info(f"   Final container: {self.final_path}")
             self.logger.info("   Type 'exit' (or Ctrl+D) when done.")
+            self.logger.info("   The session is ephemeral: nothing you do modifies the final image.")
             self.logger.info("═" * 80 + "\n")
 
+            # Ephemeral: the shell runs on the final image and must never be
+            # able to modify it (nspawn copies it for the duration of the
+            # session and deletes the copy on exit).
             try:
                 self.executor.exec_in(
                     root=self.final_path,
@@ -84,6 +88,7 @@ class Builder:
                     quiet=False,
                     check=False,
                     user=self.cmd_user,
+                    ephemeral=True,
                     boot=self.boot,
                 )
             except Exception as shell_err:

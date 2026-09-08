@@ -74,7 +74,7 @@ cmd: |
 Pass `-s` (or `--shell`) to drop into an interactive shell:
 
 - On **build failure** → shell opens inside the temporary failing layer (you can debug/fix things).
-- On **successful build** → shell opens inside the final image instead of running `cmd:`.
+- On **successful build** → shell opens inside an ephemeral copy of the final image instead of running `cmd:` (nothing you do in it is persisted).
 
 The shell always respects the user defined for that step/profile.
 
