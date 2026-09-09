@@ -1,43 +1,18 @@
 """
 fastcontainer CLI — build
 """
-import fcntl
-import os
 import shutil
 import sys
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import click
 
 from .backstore import DirBackstore
 from .builder import Builder
-from .executor import NspawnExecutor, RecordingExecutor
+from .executor import RecordingExecutor
 from .log import setup_logger
 from .models import BuildSpec
-
-@contextmanager
-def acquire_build_lock(containers_dir: Path):
-    """Exclusive lock so only one build runs at a time.
-
-    The lock is a flock on a long-lived file and the file is *never removed*:
-    if a blocked process unlinked it, a third process could create and lock a
-    different file while the original holder still had its lock, so two builds
-    could run concurrently in the same store. A stale lock file is harmless -
-    flock is held per open file description, and the next build simply locks
-    the same file again.
-    """
-    lock_path = containers_dir / ".fastcontainer.lock"
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield lock_fd
-    finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
@@ -148,25 +123,24 @@ def build(containers_dir: Path, prepare_yaml: Path, profile: str, verbose: bool,
             shutil.rmtree(workdir, ignore_errors=True)
         return
 
-    # === Real build: exclusive lock for the entire build ===
+    # === Real build ===
+    # Concurrency: Builder takes per-resource flock locks (base, each layer,
+    # final image) up front, so multiple fastcontainer builds may run at the
+    # same time in the same store (see fastcontainer.locks).
     try:
-        with acquire_build_lock(containers_dir):
-            builder = Builder(
-                containers_dir=containers_dir,
-                spec=spec,
-                profile=selected_profile,
-                prune=prune,
-                verbose=verbose,
-                logger=logger,
-                post_build_cmd=post_cmd,
-                run_cmd=True,
-                shell=shell,
-                boot=boot,
-            )
-            builder.build()
-    except BlockingIOError:
-        logger.error(f"ERROR: Another fastcontainer build is already running in {containers_dir}")
-        sys.exit(1)
+        builder = Builder(
+            containers_dir=containers_dir,
+            spec=spec,
+            profile=selected_profile,
+            prune=prune,
+            verbose=verbose,
+            logger=logger,
+            post_build_cmd=post_cmd,
+            run_cmd=True,
+            shell=shell,
+            boot=boot,
+        )
+        builder.build()
     except Exception as e:
         logger.error(f"ERROR: Build failed: {e}")
         sys.exit(1)

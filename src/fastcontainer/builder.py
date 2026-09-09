@@ -7,9 +7,59 @@ from typing import Any, List
 from .models import BuildSpec, Layer, Manifest, Step, NspawnProfile
 from .backstore import Backstore, BtrfsBackstore
 from .executor import Executor, NspawnExecutor
+from .locks import BuildLiveness, StoreLocks
 
 import logging
 logger = logging.getLogger("fastcontainer")
+
+
+def _compute_layer_hash(previous_hash: str, step: Step, nspawn_context: str) -> str:
+    """Hash chain shared by the layer plan and _build_layer.
+
+    The two MUST agree on every layer name: the plan is what gets locked up
+    front, so a mismatch would mean a path is written while un-locked.
+    """
+    content = "\n".join((previous_hash, step.user, step.cmd, nspawn_context)).encode("utf-8")
+    return hashlib.sha1(content).hexdigest()
+
+
+def plan_build_resources(spec: BuildSpec, profile: NspawnProfile) -> list[str]:
+    """Every store entry a build of *profile* (and its whole extend-chain)
+    may create or delete: the base, each profile's layer names, and each
+    profile's final image name.
+
+    Layer names are content-addressed and fully computable before executing
+    anything, which is what allows up-front locking: one lock per name,
+    acquired in sorted order (see StoreLocks), is a total order that makes
+    concurrent builds deadlock-free.
+    """
+    resources: list[str] = [spec.base.effective_name]
+
+    # extend-chain, leaf-first, then walk root-first
+    chain: list[NspawnProfile] = []
+    p: NspawnProfile | None = profile
+    while p is not None:
+        chain.append(p)
+        p = spec.profiles[p.parent] if p.parent else None
+
+    for prof in reversed(chain):
+        if prof.parent:
+            start_hash = spec.profiles[prof.parent].fingerprint
+        else:
+            # Must match Layer.initial's hash of the base name.
+            start_hash = hashlib.sha1(
+                f"BASE:{spec.base.effective_name}".encode()
+            ).hexdigest()
+        nspawn_context = "\n".join(prof.nspawn)
+        for step in prof.local_steps:
+            if not step.cmd:
+                continue
+            start_hash = _compute_layer_hash(start_hash, step, nspawn_context)
+            resources.append(f"__{spec.base.effective_name}-{start_hash}")
+        resources.append(
+            f"{spec.base.effective_name}-{prof.name}-{prof.fingerprint}"
+        )
+    return resources
 
 
 class Builder:
@@ -19,8 +69,11 @@ class Builder:
                  prune: bool = False, verbose: bool = False, logger: logging.Logger | None = None,
                  post_build_cmd: List[str] | str | None = None,
                  run_cmd: bool = True, shell: bool = False, boot: bool = False,
-                 backstore: Backstore | None = None, executor: Executor | None = None):
+                 backstore: Backstore | None = None, executor: Executor | None = None,
+                 locks: StoreLocks | None = None):
         self.containers_dir = containers_dir.resolve()
+        self._locks = locks
+        self._liveness: BuildLiveness | None = None
         self.spec = spec
         self.profile = profile
         self.prune = prune
@@ -111,10 +164,10 @@ class Builder:
 
         temp_name = f"_{self.spec.base.name}-create-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
+        self._liveness.claim(temp_name)
 
         try:
             self.backstore.create(temp_path)
-            cmd = ["/bin/bash", "-c", self.spec.base.create_cmd]
             self.executor.create_base(temp_path, self.spec.base.create_cmd, verbose=self.verbose)
             self.backstore.snapshot(temp_path, base_path)
             self.logger.info(f"Base {self.spec.base.effective_name} created successfully")
@@ -122,8 +175,13 @@ class Builder:
             self.logger.error(f"Base creation failed: {exc}")
             raise
         finally:
-            if temp_path.is_dir():
-                self.backstore.delete(temp_path)
+            self._release_temp(temp_name, temp_path)
+
+    def _release_temp(self, name: str, path: Path) -> None:
+        """Delete a temp subvolume (if it still exists) and drop our claim on it."""
+        if path.is_dir():
+            self.backstore.delete(path)
+        self._liveness.unclaim(name)
 
     def _layer_path(self, step_hash: str) -> Path:
         return self.containers_dir / f"__{self.spec.base.effective_name}-{step_hash}"
@@ -156,8 +214,7 @@ class Builder:
         # already includes step.user - the layer hash must agree, otherwise
         # a parent-profile step whose user changed would silently reuse the
         # layer built as the old user).
-        content = "\n".join((previous.hash, step.user, step.cmd, nspawn_context)).encode("utf-8")
-        step_hash = hashlib.sha1(content).hexdigest()
+        step_hash = _compute_layer_hash(previous.hash, step, nspawn_context)
         layer_path = self._layer_path(step_hash)
 
         nice_preview = _preview(step)
@@ -182,6 +239,9 @@ class Builder:
 
         temp_name = f"_{self.spec.base.effective_name}-temp-{uuid.uuid4().hex}"
         temp_path = self.containers_dir / temp_name
+        # Claim before creating: the moment the temp exists, it is protected
+        # from other builds' stale-temp cleanup (see BuildLiveness).
+        self._liveness.claim(temp_name)
 
         try:
             self.backstore.snapshot(previous.path, temp_path)
@@ -236,8 +296,7 @@ class Builder:
             raise
 
         finally:
-            if temp_path.is_dir():
-                self.backstore.delete(temp_path)
+            self._release_temp(temp_name, temp_path)
 
     def _get_cmd_to_run(self) -> List[str] | str | None:
         """Only the leaf profile (or explicit CLI post-command) runs a cmd:.
@@ -269,6 +328,10 @@ class Builder:
             boot=self.boot,
             backstore=self.backstore,
             executor=self.executor,
+            # Share the outer build's locks: its plan already covers this
+            # parent's whole chain, so the parent build acquires nothing new
+            # and cannot deadlock against itself.
+            locks=self._locks,
         )
         # no cmd_user needed for parents (we only care about it in leaf profiles)
         parent_forced = parent_builder.build()
@@ -281,8 +344,40 @@ class Builder:
         Returns True if a check: gate failed and the profile was deep-rebuilt
         (every step re-executed from scratch, ignoring the layer cache).
         Profiles extending a deep-rebuilt parent deep-rebuild as well.
+
+        Concurrency: this build locks every store path its whole
+        extend-chain will touch (base, layers, final images) up front, in
+        sorted order (see plan_build_resources / StoreLocks). Under these
+        locks no other build can create, delete or replace a path this
+        build uses, so the cache checks below are race-free. The locks are
+        released as soon as the store work is done, so a long post-build
+        cmd: or interactive shell does not hold up other builds.
         """
         self._force_rebuild = False
+
+        locks = self._locks or StoreLocks(self.containers_dir)
+        self._locks = locks
+        liveness = BuildLiveness(locks.lock_dir)
+        self._liveness = liveness
+        acquired = locks.acquire(plan_build_resources(self.spec, self.profile))
+        try:
+            try:
+                self._build_under_locks(locks)
+            finally:
+                # Store work is done (or failed): free the store even if the
+                # post-build cmd/shell still runs. Release is idempotent, so
+                # the outer finally is a no-op on this path.
+                locks.release(acquired)
+                acquired = []
+            self._handle_success()
+            return self._force_rebuild
+        finally:
+            locks.release(acquired)
+            liveness.close()
+
+    def _build_under_locks(self, locks: StoreLocks) -> None:
+        """The build pipeline proper; every store path it touches is held
+        by *locks* (see build)."""
         if self.final_path.is_dir():
             if self.profile.check:
                 self.logger.info(f"Image exists: {self.final_name} - running check")
@@ -293,8 +388,8 @@ class Builder:
                     verbose=self.verbose,
                 ):
                     self.logger.info("Check passed - using cached image")
-                    self._handle_success()
-                    return False  # Skip delta build entirely: respect the check gate for leaf profiles
+                    return  # Skip delta build entirely: respect the check gate for leaf profiles
+                            # (build() still runs the post-build cmd/shell)
                 else:
                     self.logger.warning(
                         "Check failed - deleting the cached image and deep-rebuilding: "
@@ -312,10 +407,14 @@ class Builder:
 
         self.logger.info(f"Building profile: {self.profile.name}")
 
-        # === Clean up leftover temp subvolumes from interrupted builds ===
-        # Every temp dir carries a unique uuid suffix, so anything matching one
-        # of these prefixes is stale by definition (this build creates its own
-        # temps later, with fresh suffixes).
+        # === Clean up leftover temp subvolumes from crashed builds ===
+        # Every temp dir carries a unique uuid suffix, but another build may
+        # still be running right now: a temp is stale only if no live build
+        # claims it (BuildLiveness — a crashed build's flock is already gone,
+        # so this is crash-safe without timeouts or mtime heuristics).
+        swept = self._liveness.sweep_dead()
+        if swept:
+            self.logger.info(f"Removed liveness records of {swept} dead build(s)")
         stale_prefixes = (
             f"_{self.spec.base.name}-create-",
             f"_{self.spec.base.effective_name}-temp-",
@@ -324,6 +423,9 @@ class Builder:
         cleaned = 0
         for p in sorted(self.containers_dir.iterdir()):
             if p.is_dir() and p.name.startswith(stale_prefixes):
+                if self._liveness.is_protected(p.name):
+                    self.logger.info(f"Keeping temp {p.name} (another live build owns it)")
+                    continue
                 self.logger.info(f"Cleaning up leftover temp subvolume: {p.name}")
                 try:
                     self.backstore.delete(p)
@@ -336,7 +438,11 @@ class Builder:
         if self.profile.parent:
             self.logger.info(f"  extends: {self.profile.parent}")
 
+        # The base is created under its lock, then the lock is released:
+        # once it exists it is read-only (nothing ever deletes a base), so
+        # builds of the same base may run their layer work in parallel.
         self._ensure_base_exists()
+        locks.release([self.spec.base.effective_name])
 
         if self.profile.parent:
             if self._ensure_parent_built():
@@ -378,28 +484,38 @@ class Builder:
 
             if self.final_path.is_dir():
                 self.logger.info(f"Re-creating final image from latest layer: {self.final_name}")
-                self.backstore.delete(self.final_path)          # cheap on btrfs
             else:
                 self.logger.info(f"Creating final image: {self.final_name}")
 
+            # Replace the final image atomically: snapshot to a fresh temp,
+            # delete the old image, rename the temp into place. rename(2) is
+            # atomic, so anything holding the final-image path (an nspawn
+            # session, an inspect) sees either the old or the new image,
+            # never a half-built one. We hold the final-image lock, so no
+            # other build can race this rename.
             final_temp_name = f"_{self.spec.base.effective_name}-final-{uuid.uuid4().hex}"
             final_temp_path = self.containers_dir / final_temp_name
+            self._liveness.claim(final_temp_name)
 
-            self.backstore.snapshot(current.path, final_temp_path)
+            try:
+                self.backstore.snapshot(current.path, final_temp_path)
 
-            manifest = Manifest.from_spec(
-                self.spec,
-                profile=self.profile,
-                final_name=self.final_name,
-                completed_logs=step_logs,
-                stage="final"
-            )
-            manifest_path = final_temp_path / "fastcontainer.json"
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                json.dump(manifest.to_dict(), f, indent=2)
+                manifest = Manifest.from_spec(
+                    self.spec,
+                    profile=self.profile,
+                    final_name=self.final_name,
+                    completed_logs=step_logs,
+                    stage="final"
+                )
+                manifest_path = final_temp_path / "fastcontainer.json"
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest.to_dict(), f, indent=2)
 
-            self.backstore.snapshot(final_temp_path, self.final_path)
-            self.backstore.delete(final_temp_path)
+                if self.final_path.is_dir():
+                    self.backstore.delete(self.final_path)  # cheap on btrfs
+                final_temp_path.rename(self.final_path)
+            finally:
+                self._release_temp(final_temp_name, final_temp_path)
 
             if self.prune:
                 self._prune_intermediates()
@@ -407,9 +523,6 @@ class Builder:
                 self.logger.info("Intermediate layers kept")
 
             self.logger.info(f"Successfully built/updated: {self.final_name}")
-
-            self._handle_success()
-            return self._force_rebuild
 
     def _prune_intermediates(self) -> None:
         # Prune only the layers this build used. The store may hold layers of

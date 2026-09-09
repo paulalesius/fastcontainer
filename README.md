@@ -267,13 +267,23 @@ Builds are incremental and every artifact is content-addressed:
 - **`check:` gate.** When the final image already exists and the profile defines `check:`, the check runs in an ephemeral copy of the cached image (it can never modify it). Pass → the image is reused as-is and no steps re-run. Fail → the cached image is deleted and the profile is **deep-rebuilt**: every step of that profile is re-executed from scratch, ignoring the layer cache, and so is every profile that extends it (its cached layers sit on top of the changed ones). Without `check:`, an existing image is always re-created from its (cached) layers.
 - **`--prune`** deletes only the intermediate layers used by this build; layers belonging to other profiles of the same base are kept.
 
+### Concurrent builds
+
+Multiple `fastcontainer build` invocations may run at the same time in the same `containers_dir` — including two builds of the *same* profile (the second one waits, then reuses the first one's cached layers). Coordination is per-resource, not global:
+
+- **Per-resource locks.** Each build computes its full layer plan up front (layer names are content-addressed, so every path it will ever touch is known before anything executes), then takes one `flock` per store path — the base, each layer, each final image — in **sorted order**. A single global acquisition order makes deadlocks impossible; unrelated builds (different bases, different profiles) never block each other.
+- **Atomic image replacement.** Final images are built in a temp subvolume and moved into place with `rename(2)`, so anything running on the image (`systemd-nspawn -D <image>`) sees either the old or the new one, never a half-built one.
+- **Crash-safe cleanup.** Every build holds a liveness `flock` for its lifetime and publishes the temp subvolumes it owns. A temp is swept as stale only if no *live* build claims it — a crashed build's flock is released by the kernel, so this needs no timeouts and can never delete another running build's work.
+
+Lock and liveness files live in `.fastcontainer-locks/` inside the store. They are intentionally **never deleted** (removing a lock file while another process is waiting on it is what breaks locking) — a store that has seen many different layers accumulates lock files over time; they are tiny and harmless. Locking only works between processes on the same local filesystem (flocks are local by nature), which is exactly the supported setup: one btrfs volume on one machine.
+
 ### Other features
 
 - Per-step users (`RUN(user):`, `USE(user):`, `cmd(user):`) — v0.8.0
 - Base library import via `import-base:` — v0.9.0
 - `-s` / `--shell`: interactive shell on failure **or** success — v0.7.0
 - `--prune`: delete the intermediate layers used by this build (other profiles of the same base keep theirs)
-- Automatic build lock (`.fastcontainer.lock`)
+- **Concurrent builds** — multiple builds may run at the same time in the same store (see below)
 - Every layer contains a `fastcontainer.json` manifest with full build history
 - Reusable `snippets:` + `USE:` syntax
 - `-b` / `--boot`: run the post-build `cmd:` (or the `-s` shell) with `systemd-nspawn --boot` (full machine, init/PID 1)

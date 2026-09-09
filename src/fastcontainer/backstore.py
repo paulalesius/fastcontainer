@@ -64,6 +64,11 @@ class DirBackstore(Backstore):
 
     def delete(self, path: Path) -> None:
         path = Path(path)
+        if not path.exists():
+            # Already gone. Normal under concurrency: the owner may have
+            # finished (renamed/removed) between the caller's is_dir() check
+            # and this call. Nothing to do, nothing to warn about.
+            return
         if not path.is_dir():
             logger.warning(f"Skipping delete: {path} is not a directory")
             return
@@ -102,6 +107,11 @@ class BtrfsBackstore(Backstore):
         """Delete a btrfs subvolume with safety check."""
         path = Path(path).resolve()
 
+        if not path.exists():
+            # Already gone. Normal under concurrency: the owner may have
+            # finished (renamed/removed) between the caller's is_dir() check
+            # and this call. Nothing to do, nothing to warn about.
+            return
         if not path.is_dir():
             logger.warning(f"Skipping delete: {path} is not a directory")
             return
